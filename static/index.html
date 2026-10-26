@@ -12,7 +12,7 @@
 <body>
 <header>
   <h1>🌱 GrowLog</h1>
-  <span><span id="status"></span> <button id="logout" class="link" hidden>Abmelden</button></span>
+  <span><span id="status"></span> <button id="me-btn" class="link">👤 <span id="me-name"></span></button></span>
 </header>
 
 <main>
@@ -102,18 +102,67 @@
       <button class="primary" id="s-save">Zeiten speichern</button>
       <p class="hint">Für die Verbrauchsberechnung: wann das Licht läuft und wann du normalerweise gießt.</p>
     </div>
+  </section>
+
+  <!-- KONTO -->
+  <section id="tab-account" class="tab">
+    <div class="card">
+      <h2>Konto</h2>
+      <p class="acc-line">Angemeldet als <b id="acc-name"></b> <span class="muted" id="acc-role"></span></p>
+      <button id="logout">Abmelden</button>
+    </div>
+    <div class="card">
+      <h2>Passwort ändern</h2>
+      <form id="pw-form" autocomplete="on">
+        <input type="text" id="pw-user" autocomplete="username" hidden tabindex="-1">
+        <label>Aktuelles Passwort<input type="password" id="pw-cur" autocomplete="current-password" required></label>
+        <label>Neues Passwort (mind. 8 Zeichen)<input type="password" id="pw-new" autocomplete="new-password" minlength="8" required></label>
+        <label>Neues Passwort wiederholen<input type="password" id="pw-new2" autocomplete="new-password" minlength="8" required></label>
+        <button class="primary" type="submit">Passwort ändern</button>
+      </form>
+    </div>
+    <div class="card">
+      <h2>Discord</h2>
+      <label>Webhook-Adresse
+        <input type="url" id="acc-hook" placeholder="https://discord.com/api/webhooks/…" autocomplete="off">
+      </label>
+      <div class="btns">
+        <button class="primary" id="hook-save">Speichern</button>
+        <button id="hook-remove" hidden>Entfernen</button>
+      </div>
+      <p class="hint" id="hook-hint">In Discord: Kanal → Integrationen → Webhooks. Damit sendet der Knopf "An Discord senden" in deinen Kanal.</p>
+    </div>
     <div class="card">
       <h2>Daten &amp; Backup</h2>
       <div class="btns2">
         <a class="btn" href="/api/csv/weigh" download>CSV Gewichte</a>
         <a class="btn" href="/api/csv/water" download>CSV Gießen</a>
         <a class="btn" href="/api/csv/notes" download>CSV Notizen</a>
-        <a class="btn" href="/api/backup" download>Backup (.db)</a>
-        <label class="btn wide">Aus Backup wiederherstellen
+        <a class="btn" href="/api/backup" download data-admin hidden>Backup (.db)</a>
+        <label class="btn wide" data-admin hidden>Aus Backup wiederherstellen
           <input type="file" id="restore" accept=".db,.sqlite,application/octet-stream" hidden>
         </label>
       </div>
-      <p class="hint" id="backup-hint"></p>
+      <p class="hint" id="backup-hint" data-admin hidden></p>
+    </div>
+    <div class="card" id="admin-card" hidden>
+      <h2>Benutzer</h2>
+      <div id="user-list" class="list"></div>
+      <h2 class="sub-h">Benutzer anlegen</h2>
+      <div class="row3 row3u">
+        <input type="text" id="nu-name" placeholder="Benutzername" autocapitalize="none" autocomplete="off">
+        <input type="text" id="nu-pw" placeholder="Passwort" autocomplete="off">
+        <button id="nu-add">+</button>
+      </div>
+      <h2 class="sub-h">Server</h2>
+      <label>Zeitzone<input type="text" id="cfg-tz" placeholder="Europe/Berlin" autocomplete="off"></label>
+      <label class="row"><span>Hinter Reverse-Proxy (Nginx Proxy Manager o. ä.)</span><input type="checkbox" id="cfg-proxy"></label>
+      <button id="cfg-save">Server-Einstellungen speichern</button>
+      <h2 class="sub-h">Einladung</h2>
+      <button id="inv-create">Einladungslink erzeugen</button>
+      <div id="inv-out"></div>
+      <div id="inv-list" class="list"></div>
+      <p class="hint">Der Link ist 7 Tage gültig und nur einmal nutzbar. Jeder Nutzer sieht nur seine eigenen Daten.</p>
     </div>
   </section>
 

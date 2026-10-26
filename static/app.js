@@ -68,16 +68,18 @@ function renderAssist() {
 }
 
 // ---------- Tabs
-document.querySelectorAll("nav button").forEach((b) =>
-  b.addEventListener("click", () => {
-    document.querySelectorAll("nav button, .tab").forEach((e) => e.classList.remove("active"));
-    b.classList.add("active");
-    $("#tab-" + b.dataset.tab).classList.add("active");
-    if (b.dataset.tab === "discord") loadDiscord();
-    if (b.dataset.tab === "log") renderLog();
-    if (b.dataset.tab === "plants") renderPlants();
-  })
-);
+function showTab(name) {
+  document.querySelectorAll("nav button, .tab").forEach((e) => e.classList.remove("active"));
+  const nb = document.querySelector(`nav button[data-tab="${name}"]`);
+  if (nb) nb.classList.add("active");
+  $("#tab-" + name).classList.add("active");
+  if (name === "discord") loadDiscord();
+  if (name === "log") renderLog();
+  if (name === "plants") renderPlants();
+  if (name === "account") renderAccount();
+}
+document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+$("#me-btn").onclick = () => showTab("account");
 
 // ---------- Wiegen
 function renderWeighForm() {
@@ -285,6 +287,91 @@ $("#p-add").onclick = async () => {
 };
 $("#p-name").addEventListener("keydown", (e) => e.key === "Enter" && $("#p-add").click());
 
+// ---------- Konto
+function copyText(text) {
+  return navigator.clipboard.writeText(text).then(() => toast("Kopiert")).catch(() => toast("Bitte von Hand kopieren", true));
+}
+function renderAccount() {
+  const me = S.me || { username: "", role: "user" };
+  $("#acc-name").textContent = me.username;
+  $("#acc-role").textContent = me.role === "admin" ? "(Admin)" : "";
+  $("#pw-user").value = me.username;
+  $("#acc-hook").placeholder = S.webhook ? "Webhook gespeichert – zum Ändern neue Adresse einfügen" : "https://discord.com/api/webhooks/…";
+  $("#hook-remove").hidden = !S.webhook;
+  if (me.role === "admin") { loadUsers(); loadConfig(); }
+}
+async function loadConfig() {
+  try { const c = await api("/api/config"); $("#cfg-tz").value = c.tz; $("#cfg-proxy").checked = c.trust_proxy; } catch {}
+}
+$("#cfg-save").onclick = async () => {
+  try { await api("/api/config", "PUT", { tz: $("#cfg-tz").value, trust_proxy: $("#cfg-proxy").checked }); toast("Gespeichert"); await load(); }
+  catch (err) { toast(err.message, true); }
+};
+$("#pw-form").onsubmit = async (e) => {
+  e.preventDefault();
+  if ($("#pw-new").value !== $("#pw-new2").value) return toast("Die neuen Passwörter stimmen nicht überein", true);
+  try {
+    await api("/api/me", "PUT", { current_password: $("#pw-cur").value, new_password: $("#pw-new").value });
+    ["#pw-cur", "#pw-new", "#pw-new2"].forEach((s) => ($(s).value = ""));
+    toast("Passwort geändert");
+  } catch (err) { toast(err.message, true); }
+};
+$("#hook-save").onclick = async () => {
+  const v = $("#acc-hook").value.trim();
+  if (!v) return toast("Bitte eine Webhook-Adresse einfügen", true);
+  try { await api("/api/me", "PUT", { webhook: v }); $("#acc-hook").value = ""; toast("Webhook gespeichert"); await load(); renderAccount(); }
+  catch (err) { toast(err.message, true); }
+};
+$("#hook-remove").onclick = async () => {
+  if (!confirm("Webhook entfernen?")) return;
+  await api("/api/me", "PUT", { webhook: "" }); toast("Webhook entfernt"); await load(); renderAccount();
+};
+async function loadUsers() {
+  let d;
+  try { d = await api("/api/users"); } catch { return; }
+  const myName = (S.me || {}).username;
+  $("#user-list").innerHTML = d.users.map((u) => {
+    const self = u.username === myName;
+    return `<div class="item"><div><b>${esc(u.username)}</b> <span class="muted">${u.role === "admin" ? "Admin" : "Nutzer"}${u.active ? "" : " · gesperrt"}</span></div>` +
+      `<div class="ubtns"><button data-upw="${u.id}" title="Passwort zurücksetzen">🔑</button>` +
+      (self ? "" : `<button data-uact="${u.id}" data-on="${u.active ? 1 : 0}" title="${u.active ? "Sperren" : "Entsperren"}">${u.active ? "⏸" : "▶"}</button>` +
+        `<button data-urole="${u.id}" data-r="${u.role}" title="Rolle wechseln">${u.role === "admin" ? "⬇" : "👑"}</button>` +
+        `<button data-udel="${u.id}" data-n="${esc(u.username)}" title="Löschen">🗑</button>`) + `</div></div>`;
+  }).join("");
+  const act = async (id, body, ok) => { try { await api("/api/users/" + id, "PUT", body); toast(ok); loadUsers(); } catch (err) { toast(err.message, true); } };
+  document.querySelectorAll("[data-upw]").forEach((b) => (b.onclick = () => {
+    const name = d.users.find((u) => u.id == b.dataset.upw).username;
+    const pw = prompt(`Neues Passwort für ${name} (mind. 8 Zeichen):`);
+    if (pw) act(b.dataset.upw, { password: pw }, "Passwort gesetzt");
+  }));
+  document.querySelectorAll("[data-uact]").forEach((b) => (b.onclick = () => act(b.dataset.uact, { active: b.dataset.on !== "1" }, "Gespeichert")));
+  document.querySelectorAll("[data-urole]").forEach((b) => (b.onclick = () => act(b.dataset.urole, { role: b.dataset.r === "admin" ? "user" : "admin" }, "Rolle geändert")));
+  document.querySelectorAll("[data-udel]").forEach((b) => (b.onclick = async () => {
+    if (!confirm(`Benutzer „${b.dataset.n}“ und ALLE seine Daten unwiderruflich löschen?`)) return;
+    try { await api("/api/users/" + b.dataset.udel, "DELETE"); toast("Benutzer gelöscht"); loadUsers(); } catch (err) { toast(err.message, true); }
+  }));
+  $("#inv-list").innerHTML = d.invites.map((i) =>
+    `<div class="item"><div><span class="muted">Offene Einladung</span><div class="when">gültig bis ${fmtTs(i.expires)}</div></div>` +
+    `<div class="ubtns"><button data-icopy="${esc(i.token)}">📋</button><button data-idel="${esc(i.token)}">✕</button></div></div>`).join("");
+  document.querySelectorAll("[data-icopy]").forEach((b) => (b.onclick = () => copyText(`${location.origin}/register?token=${b.dataset.icopy}`)));
+  document.querySelectorAll("[data-idel]").forEach((b) => (b.onclick = async () => { await api("/api/invites/" + b.dataset.idel, "DELETE"); loadUsers(); }));
+}
+$("#nu-add").onclick = async () => {
+  try {
+    await api("/api/users", "POST", { username: $("#nu-name").value, password: $("#nu-pw").value });
+    $("#nu-name").value = ""; $("#nu-pw").value = ""; toast("Benutzer angelegt"); loadUsers();
+  } catch (err) { toast(err.message, true); }
+};
+$("#inv-create").onclick = async () => {
+  try {
+    const r = await api("/api/invites", "POST", {});
+    const link = `${location.origin}${r.path}`;
+    $("#inv-out").innerHTML = `<input type="text" readonly value="${esc(link)}" onclick="this.select()"><p class="hint">Gültig ${r.days} Tage, einmal nutzbar.</p>`;
+    copyText(link);
+    loadUsers();
+  } catch (err) { toast(err.message, true); }
+};
+
 // ---------- Discord
 let discordText = "";
 async function loadDiscord() {
@@ -292,7 +379,7 @@ async function loadDiscord() {
   discordText = d.text;
   $("#d-text").textContent = d.text.replace(/^```\n?|\n?```$/g, "");
   $("#d-post").disabled = !S.webhook;
-  $("#d-hint").textContent = S.webhook ? "" : "Zum direkten Senden DISCORD_WEBHOOK_URL in der docker-compose.yml setzen.";
+  $("#d-hint").textContent = S.webhook ? "" : "Zum direkten Senden den Discord-Webhook im Tab Konto hinterlegen.";
 }
 $("#d-water").onchange = loadDiscord;
 $("#d-copy").onclick = async () => {
@@ -309,7 +396,10 @@ async function load() {
   try {
     S = await api("/api/state");
     $("#status").textContent = "";
-    $("#logout").hidden = !S.auth;
+    const me = S.me || { username: "", role: "user" };
+    $("#me-name").textContent = me.username;
+    document.querySelectorAll("[data-admin]").forEach((e) => (e.hidden = me.role !== "admin"));
+    $("#admin-card").hidden = me.role !== "admin";
   } catch (e) { $("#status").textContent = "offline"; return; }
   renderWeighForm();
   renderWaterForm();

@@ -88,3 +88,13 @@ button.sug { padding: 2px 0; text-align: left; }
 .btn { display: block; margin: 0; text-decoration: none; text-align: center; background: var(--bg); color: var(--text);
   border: 1px solid var(--line); border-radius: 10px; padding: 12px 10px; font-size: .95rem; cursor: pointer; }
 .as small { display: block; }
+.acc-line { margin: 0 0 12px; }
+.sub-h { margin-top: 18px; }
+.row3u { grid-template-columns: 1fr 1fr 48px; }
+.ubtns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.ubtns button { padding: 6px 9px; }
+#inv-out input { margin-top: 10px; font-size: .8rem; }
+#me-btn { color: var(--text); text-decoration: none; font-size: .9rem; }
+nav button { min-width: 0; }
+nav button span { font-size: .62rem; }
+[hidden] { display: none !important; }

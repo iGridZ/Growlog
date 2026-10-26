@@ -8,46 +8,45 @@ und fertiger Discord-Block (nur heute + gestern, mit Verlust seit dem letzten Wi
     git clone https://github.com/iGridZ/Growlog.git && cd Growlog
     docker build -t growlog .
     docker run -d --name growlog --restart unless-stopped \
-      -p 8087:8087 \
-      -v "$(pwd)/data:/data" \
-      -e TZ_NAME=Europe/Berlin \
-      -e APP_USER='grow' \
-      -e APP_PASSWORD='bitte-aendern' \
-      -e DISCORD_WEBHOOK_URL='' \
-      growlog
+      -p 8087:8087 -v "$(pwd)/data:/data" growlog
 
-Dann `http://<server-ip>:8087` öffnen. Daten liegen in `./data/growlog.db` (Backup = diese Datei kopieren).
+Dann `http://<server-ip>:8087` öffnen. Beim allerersten Aufruf erscheint eine Einrichtungsseite, auf der du
+den Admin-Zugang (Benutzername + Passwort) anlegst. **Alles Weitere wird im Web-UI eingestellt**, es sind keine
+Umgebungsvariablen nötig. Daten liegen in `./data/growlog.db`.
 
 ## Fertiges Image statt selbst bauen
 
-Nach jedem Push auf `main` baut GitHub Actions das Image und legt es in die GitHub Container Registry.
-Einmalig im Repo unter Actions den Workflow `build-image` laufen lassen, danach auf dem Server:
+Nach jedem Push auf `main` baut GitHub Actions das Image und legt es in die GitHub Container Registry:
 
     docker pull ghcr.io/igridz/growlog:latest
     docker run -d --name growlog --restart unless-stopped -p 8087:8087 \
-      -v "$(pwd)/data:/data" -e APP_USER='grow' -e APP_PASSWORD='bitte-aendern' \
-      ghcr.io/igridz/growlog:latest
+      -v "$(pwd)/data:/data" ghcr.io/igridz/growlog:latest
 
 Ist das Paket privat, vorher `docker login ghcr.io` mit einem Token (read:packages), oder das Paket in den
 GitHub-Einstellungen auf öffentlich stellen.
 
 ## Update
 
-    git pull
-    docker build -t growlog .
+    docker pull ghcr.io/igridz/growlog:latest
     docker rm -f growlog
     # danach den docker run-Befehl von oben erneut ausführen (Daten bleiben in ./data)
 
-## Einstellungen (Umgebungsvariablen)
+Bestehende Daten einer älteren Version werden beim ersten Start automatisch dem ersten Admin zugeordnet.
 
-- `APP_USER` / `APP_PASSWORD`: Zugangsdaten für die Anmeldeseite (Standard-Benutzer `grow`). Die Seite ist ein normales
-  Formular, Bitwarden bietet Speichern und Ausfüllen an. Nach dem Login bleibst du 90 Tage angemeldet.
-  Nach 5 Fehlversuchen ist die IP 5 Minuten gesperrt. Ein neues Passwort meldet alle Geräte ab. Leer = kein Login.
-- `SECRET_KEY`: optional. Ohne Angabe wird beim ersten Start ein Schlüssel in `data/secret.key` erzeugt.
-- `TRUST_PROXY`: Standard `1` (App steht hinter Nginx Proxy Manager, echte IP und https werden übernommen).
-  Bei direktem Zugriff ohne Proxy auf `0` setzen.
-- `DISCORD_WEBHOOK_URL`: in Discord unter Kanal → Integrationen → Webhooks erzeugen. Aktiviert den Knopf "An Discord senden".
-- `TZ_NAME`: Zeitzone für Anzeige und Discord-Text (Standard Europe/Berlin).
+## Konten und Einstellungen (alles im Web-UI)
+
+Tab "Konto" (Kopfzeile oben rechts):
+
+- **Jeder Nutzer:** Passwort ändern, eigenen Discord-Webhook hinterlegen, abmelden. Pflanzen, Gewichte, Gießen,
+  Notizen und Zeiten sind pro Nutzer getrennt.
+- **Admin:** Benutzer anlegen, sperren, Rolle ändern, Passwort zurücksetzen, löschen; Einladungslinks erzeugen
+  (7 Tage gültig, einmal nutzbar, Freunde registrieren sich damit selbst); Server-Einstellungen (Zeitzone,
+  Betrieb hinter Reverse-Proxy); Datenbank-Backup und Wiederherstellung (ersetzt alle Konten).
+- Anmeldung bleibt 90 Tage, nach 5 Fehlversuchen ist die IP 5 Minuten gesperrt.
+
+Optionale Umgebungsvariablen (nur Startwerte, nichts davon ist nötig): `APP_USER` / `APP_PASSWORD` legen den
+ersten Admin automatisch an (statt der Einrichtungsseite), `TZ_NAME`, `TRUST_PROXY`, `SECRET_KEY`
+(sonst automatisch in `data/secret.key`), `PORT`, `DB_PATH`.
 
 ## Von außen / aufs Handy
 
@@ -77,10 +76,10 @@ Das sind Richtwerte, der Fingertest entscheidet.
 
 ## Export und Backup
 
-Im Tab "Pflanzen" unter "Daten & Backup":
+Im Tab "Konto" unter "Daten & Backup":
 
 - CSV-Export für Gewichte, Gießen und Notizen (Excel-tauglich: Semikolon, Dezimalkomma, UTF-8).
-- Backup als `.db`-Datei herunterladen und über "Aus Backup wiederherstellen" wieder einspielen
+- Nur Admin: Backup als `.db`-Datei herunterladen und über "Aus Backup wiederherstellen" wieder einspielen
   (vorher wird automatisch eine Kopie `vor-restore-…` angelegt).
 - Automatisch: einmal pro Tag eine Kopie in `data/backups/` (die letzten 14 bleiben).
 

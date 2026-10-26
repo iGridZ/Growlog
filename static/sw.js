@@ -1,5 +1,5 @@
 // Minimaler Service Worker: App-Shell aus dem Cache, API immer live.
-const CACHE = "growlog-v6";
+const CACHE = "growlog-v7";
 const SHELL = ["/", "/static/style.css", "/static/app.js"];
 self.addEventListener("install", (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener("activate", (e) => e.waitUntil(

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14201a">
+<link rel="icon" href="/static/icons/icon-192.png">
+<title>GrowLog – Konto anlegen</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .login { max-width: 380px; margin: 10vh auto 0; }
+  .err { color: var(--danger); font-size: .9rem; margin: 0 0 10px; }
+  h1 { text-align: center; margin-bottom: 4px; }
+  .sub { text-align: center; color: var(--muted); margin: 0 0 16px; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main class="login">
+  <h1>🌱 GrowLog</h1>
+  <p class="sub">Du wurdest eingeladen. Lege dein Konto an.</p>
+  <form class="card" method="post" action="/register" autocomplete="on">
+    <input type="hidden" name="token" value="<!--TOKEN-->">
+    <label>Benutzername
+      <input type="text" name="username" autocomplete="username" autocapitalize="none" autocorrect="off"
+             spellcheck="false" minlength="3" maxlength="32" required autofocus>
+    </label>
+    <label>Passwort (mindestens 8 Zeichen)
+      <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label>Passwort wiederholen
+      <input type="password" name="password2" autocomplete="new-password" minlength="8" required>
+    </label>
+    <!--ERR-->
+    <button class="primary" type="submit" <!--DISABLED-->>Konto anlegen</button>
+  </form>
+</main>
+</body>
+</html>

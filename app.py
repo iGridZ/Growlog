@@ -1,6 +1,6 @@
 """GrowLog – kleines Grow-Tagebuch: Wiegen, Gießen (ml), Notizen, Discord-Export."""
 import csv
-import hashlib
+import functools
 import hmac
 import io
 import json
@@ -19,42 +19,71 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, g, jsonify, redirect, request, send_file, send_from_directory
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from markupsafe import escape
+from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Berlin"))
 DB_PATH = os.environ.get("DB_PATH", "/data/growlog.db")
+# Nur für den ersten Start: legen den Admin an, falls es noch keine Konten gibt
 PASSWORD = os.environ.get("APP_PASSWORD", "")
-USER = os.environ.get("APP_USER", "grow")
+USER = os.environ.get("APP_USER", "admin")
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # Restore-Upload
-if os.environ.get("TRUST_PROXY", "1") == "1":  # hinter Nginx Proxy Manager: echte IP und https übernehmen
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+# Server-Einstellungen (Zeitzone, Proxy) stehen in der Datenbank und werden im Web-UI geändert.
+# Die Umgebungsvariablen TZ_NAME / TRUST_PROXY gelten nur als Startwert.
+CFG = {"tz": os.environ.get("TZ_NAME", "Europe/Berlin"),
+       "trust_proxy": os.environ.get("TRUST_PROXY", "1") == "1"}
+
+
+class _Proxy:
+    """Übernimmt echte IP/https von einem Reverse-Proxy, falls im UI aktiviert."""
+    def __init__(self, wsgi):
+        self.plain, self.fixed = wsgi, ProxyFix(wsgi, x_for=1, x_proto=1)
+
+    def __call__(self, environ, start_response):
+        return (self.fixed if CFG["trust_proxy"] else self.plain)(environ, start_response)
+
+
+app.wsgi_app = _Proxy(app.wsgi_app)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  pw_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', active INTEGER NOT NULL DEFAULT 1,
+  webhook TEXT, created TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invites (
+  token TEXT PRIMARY KEY, created_by INTEGER NOT NULL, created TEXT NOT NULL,
+  expires TEXT NOT NULL, used_by INTEGER
+);
 CREATE TABLE IF NOT EXISTS plants (
-  key TEXT PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1, target INTEGER, threshold INTEGER
+  user_id INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, name TEXT NOT NULL,
+  sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, target INTEGER, threshold INTEGER,
+  PRIMARY KEY (user_id, key)
 );
 CREATE TABLE IF NOT EXISTS weigh (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 0, ts TEXT NOT NULL,
   plant TEXT NOT NULL, grams INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS water (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 0, ts TEXT NOT NULL,
   plant TEXT NOT NULL, ml INTEGER NOT NULL,
   ph REAL, alfa REAL, roots REAL, extra TEXT
 );
 CREATE TABLE IF NOT EXISTS note (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL DEFAULT 0, ts TEXT NOT NULL,
   plant TEXT, text TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS i_weigh_ts ON weigh(ts);
-CREATE INDEX IF NOT EXISTS i_water_ts ON water(ts);
+CREATE TABLE IF NOT EXISTS settings (
+  user_id INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, value TEXT NOT NULL,
+  PRIMARY KEY (user_id, key)
+);
+CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
@@ -73,18 +102,75 @@ def close_db(_exc):
         conn.close()
 
 
+def table_cols(conn, name):
+    return [r[1] for r in conn.execute(f"PRAGMA table_info({name})")]
+
+
+def create_user(conn, username, password, role="user", webhook=None):
+    cur = conn.execute(
+        "INSERT INTO users(username, pw_hash, role, webhook, created) VALUES (?,?,?,?,?)",
+        (username, generate_password_hash(password), role, webhook or None, iso(now_utc())))
+    return cur.lastrowid
+
+
+def adopt_orphans(conn, user_id):
+    """Daten aus Version 1/2 (ohne Besitzer) gehören dem ersten Admin."""
+    for table in ("plants", "weigh", "water", "note", "settings"):
+        conn.execute(f"UPDATE {table} SET user_id=? WHERE user_id=0", (user_id,))
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(plants)")]
-    if "active" not in cols:  # Migration für Datenbanken aus Version 1
-        conn.execute("ALTER TABLE plants ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
-    for col in ("target", "threshold"):
-        if col not in cols:
-            conn.execute(f"ALTER TABLE plants ADD COLUMN {col} INTEGER")
+    pc = table_cols(conn, "plants")
+    if "user_id" not in pc:  # Datenbank aus Version 1/2: auf Mehrbenutzer umstellen
+        for col, ddl in (("active", "INTEGER NOT NULL DEFAULT 1"), ("target", "INTEGER"), ("threshold", "INTEGER")):
+            if col not in pc:
+                conn.execute(f"ALTER TABLE plants ADD COLUMN {col} {ddl}")
+        conn.executescript("""
+            CREATE TABLE plants_new (
+              user_id INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL, name TEXT NOT NULL,
+              sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, target INTEGER, threshold INTEGER,
+              PRIMARY KEY (user_id, key));
+            INSERT INTO plants_new(user_id, key, name, sort, active, target, threshold)
+              SELECT 0, key, name, sort, active, target, threshold FROM plants;
+            DROP TABLE plants;
+            ALTER TABLE plants_new RENAME TO plants;""")
+    if "user_id" not in table_cols(conn, "settings"):
+        conn.executescript("""
+            CREATE TABLE settings_new (user_id INTEGER NOT NULL DEFAULT 0, key TEXT NOT NULL,
+              value TEXT NOT NULL, PRIMARY KEY (user_id, key));
+            INSERT INTO settings_new(user_id, key, value) SELECT 0, key, value FROM settings;
+            DROP TABLE settings;
+            ALTER TABLE settings_new RENAME TO settings;""")
+    for table in ("weigh", "water", "note"):
+        if "user_id" not in table_cols(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS i_weigh_user ON weigh(user_id, ts);
+        CREATE INDEX IF NOT EXISTS i_water_user ON water(user_id, ts);
+        CREATE INDEX IF NOT EXISTS i_note_user ON note(user_id, ts);""")
     conn.commit()
+    if PASSWORD and conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        adopt_orphans(conn, create_user(conn, USER, PASSWORD, "admin", WEBHOOK))
+        conn.commit()
+    load_config(conn)
     conn.close()
+
+
+def load_config(conn):
+    """Gespeicherte Server-Einstellungen übernehmen (überschreiben die Startwerte aus den Umgebungsvariablen)."""
+    global TZ
+    for k, v in conn.execute("SELECT key, value FROM config"):
+        if k == "tz":
+            try:
+                TZ = ZoneInfo(v)
+                CFG["tz"] = v
+            except Exception:
+                pass
+        elif k == "trust_proxy":
+            CFG["trust_proxy"] = v == "1"
 
 
 def now_utc():
@@ -116,10 +202,12 @@ def day_label(d):
 # ---------------------------------------------------------------- Auth
 COOKIE = "growlog_session"
 SESSION_DAYS = 90
-PUBLIC_PATHS = ("/login", "/manifest.webmanifest", "/sw.js", "/static/style.css", "/static/icons/")
-MAX_FAILS, LOCK_SECONDS = 5, 300
-_fails = {}  # ip -> (fehlversuche, gesperrt_bis)
+PUBLIC_PATHS = ("/login", "/register", "/setup", "/manifest.webmanifest", "/sw.js",
+                "/static/style.css", "/static/icons/")
+INVITE_DAYS = 7
+_attempts = {}
 _serializer = None
+DUMMY_HASH = generate_password_hash("kein-benutzer")
 
 
 def _secret():
@@ -138,71 +226,185 @@ def _secret():
         return key
 
 
-def _pw_tag():
-    return hashlib.sha256(PASSWORD.encode()).hexdigest()[:16]
-
-
-def make_token():
+def ser():
     global _serializer
-    _serializer = _serializer or URLSafeTimedSerializer(_secret(), salt="growlog-session")
-    return _serializer.dumps({"u": USER, "p": _pw_tag()})
+    _serializer = _serializer or URLSafeTimedSerializer(_secret(), salt="growlog-session-v2")
+    return _serializer
 
 
-def valid_token(token):
-    global _serializer
-    _serializer = _serializer or URLSafeTimedSerializer(_secret(), salt="growlog-session")
+def user_from_cookie():
     try:
-        data = _serializer.loads(token, max_age=SESSION_DAYS * 86400)
+        data = ser().loads(request.cookies.get(COOKIE, ""), max_age=SESSION_DAYS * 86400)
     except BadSignature:
-        return False
+        return None
+    if not isinstance(data, dict):
+        return None
+    row = db().execute("SELECT * FROM users WHERE id=? AND active=1", (data.get("uid"),)).fetchone()
     # Passwortwechsel macht alte Sessions ungültig
-    return isinstance(data, dict) and data.get("u") == USER and data.get("p") == _pw_tag()
+    if row and hmac.compare_digest(str(data.get("v")), row["pw_hash"][-12:]):
+        return row
+    return None
+
+
+def with_session(resp, user):
+    resp.set_cookie(COOKIE, ser().dumps({"uid": user["id"], "v": user["pw_hash"][-12:]}),
+                    max_age=SESSION_DAYS * 86400, httponly=True, samesite="Lax", secure=request.is_secure)
+    return resp
+
+
+def no_users():
+    return db().execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+
+
+def too_many(key, limit, window):
+    now_t = time.time()
+    recent = [t for t in _attempts.get(key, []) if now_t - t < window]
+    _attempts[key] = recent
+    return len(recent) >= limit
+
+
+def note_fail(*keys):
+    for k in keys:
+        _attempts.setdefault(k, []).append(time.time())
+
+
+def valid_username(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", name or ""))
+
+
+def password_problem(pw, username=""):
+    if len(pw or "") < 8:
+        return "Das Passwort braucht mindestens 8 Zeichen."
+    if len(pw) > 200:
+        return "Das Passwort ist zu lang."
+    if username and pw.lower() == username.lower():
+        return "Das Passwort darf nicht der Benutzername sein."
+    return None
+
+
+WEBHOOK_RE = re.compile(r"https://(?:discord|discordapp)\.com/api/webhooks/\d+/[\w-]+")
 
 
 @app.before_request
 def require_auth():
-    if not PASSWORD or request.path.startswith(PUBLIC_PATHS):
+    if request.path.startswith(PUBLIC_PATHS):
         return None
-    if valid_token(request.cookies.get(COOKIE, "")):
+    g.user = user_from_cookie()
+    if g.user:
         return None
     if request.path.startswith("/api/"):
         return jsonify(error="Nicht angemeldet"), 401
-    return redirect("/login")
+    return redirect("/setup" if no_users() else "/login")
 
 
-def login_page(error=""):
-    with open(os.path.join(app.static_folder, "login.html"), encoding="utf-8") as f:
-        html = f.read().replace("<!--ERR-->", error)
+def admin_required(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.user["role"] != "admin":
+            return jsonify(error="Nur für Admins"), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def render_page(name, error="", **extra):
+    with open(os.path.join(app.static_folder, name), encoding="utf-8") as f:
+        html = f.read().replace("<!--ERR-->", f'<p class="err">{escape(error)}</p>' if error else "")
+    for key, value in extra.items():
+        html = html.replace(f"<!--{key}-->", str(escape(value)))
     return Response(html, mimetype="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/login")
 def login_form():
-    if not PASSWORD or valid_token(request.cookies.get(COOKIE, "")):
+    if no_users():
+        return redirect("/setup")
+    if user_from_cookie():
         return redirect("/")
-    return login_page()
+    return render_page("login.html")
 
 
 @app.post("/login")
 def login_submit():
-    if not PASSWORD:
-        return redirect("/")
+    if no_users():
+        return redirect("/setup")
     ip = request.remote_addr or "?"
-    count, locked_until = _fails.get(ip, (0, 0))
-    if locked_until > time.time():
-        return login_page('<p class="err">Zu viele Versuche. Bitte in ein paar Minuten erneut versuchen.</p>'), 429
-    user_ok = hmac.compare_digest(request.form.get("username", "").encode(), USER.encode())
-    pw_ok = hmac.compare_digest(request.form.get("password", "").encode(), PASSWORD.encode())
-    if not (user_ok and pw_ok):
-        count += 1
-        _fails[ip] = (0, time.time() + LOCK_SECONDS) if count >= MAX_FAILS else (count, 0)
+    username = request.form.get("username", "").strip()
+    if too_many("ip:" + ip, 5, 300) or too_many("user:" + username.lower(), 20, 900):
+        return render_page("login.html", "Zu viele Versuche. Bitte in ein paar Minuten erneut versuchen."), 429
+    row = db().execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
+    password = request.form.get("password", "")
+    ok = check_password_hash(row["pw_hash"] if row else DUMMY_HASH, password) and row is not None
+    if not ok:
+        note_fail("ip:" + ip, "user:" + username.lower())
         time.sleep(0.5)
-        return login_page('<p class="err">Benutzername oder Passwort falsch.</p>'), 401
-    _fails.pop(ip, None)
-    resp = redirect("/")
-    resp.set_cookie(COOKIE, make_token(), max_age=SESSION_DAYS * 86400, httponly=True,
-                    samesite="Lax", secure=request.is_secure)
-    return resp
+        return render_page("login.html", "Benutzername oder Passwort falsch."), 401
+    _attempts.pop("ip:" + ip, None)
+    return with_session(redirect("/"), row)
+
+
+@app.get("/setup")
+def setup_form():
+    if not no_users():
+        return redirect("/login")
+    return render_page("setup.html")
+
+
+@app.post("/setup")
+def setup_submit():
+    if not no_users():
+        return redirect("/login")
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    if not valid_username(username):
+        return render_page("setup.html", "Benutzername: 3-32 Zeichen (Buchstaben, Zahlen, _ . -)."), 400
+    problem = password_problem(password, username)
+    if problem or password != request.form.get("password2", ""):
+        return render_page("setup.html", problem or "Die Passwörter stimmen nicht überein."), 400
+    conn = db()
+    uid_ = create_user(conn, username, password, "admin", WEBHOOK)
+    adopt_orphans(conn, uid_)
+    conn.commit()
+    return with_session(redirect("/"), conn.execute("SELECT * FROM users WHERE id=?", (uid_,)).fetchone())
+
+
+def open_invite(token):
+    return db().execute(
+        "SELECT * FROM invites WHERE token=? AND used_by IS NULL AND expires > ?",
+        (token or "", iso(now_utc()))).fetchone()
+
+
+@app.get("/register")
+def register_form():
+    token = request.args.get("token", "")
+    if not open_invite(token):
+        return render_page("register.html", "Diese Einladung ist ungültig oder abgelaufen.", TOKEN="", DISABLED="disabled")
+    return render_page("register.html", TOKEN=token, DISABLED="")
+
+
+@app.post("/register")
+def register_submit():
+    token = request.form.get("token", "")
+    inv = open_invite(token)
+    if not inv:
+        return render_page("register.html", "Diese Einladung ist ungültig oder abgelaufen.", TOKEN="", DISABLED="disabled"), 400
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    problem = None
+    if not valid_username(username):
+        problem = "Benutzername: 3-32 Zeichen (Buchstaben, Zahlen, _ . -)."
+    elif db().execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+        problem = "Diesen Benutzernamen gibt es schon."
+    else:
+        problem = password_problem(password, username)
+        if not problem and password != request.form.get("password2", ""):
+            problem = "Die Passwörter stimmen nicht überein."
+    if problem:
+        return render_page("register.html", problem, TOKEN=token, DISABLED=""), 400
+    conn = db()
+    uid_ = create_user(conn, username, password, "user")
+    conn.execute("UPDATE invites SET used_by=? WHERE token=?", (uid_, token))
+    conn.commit()
+    return with_session(redirect("/"), conn.execute("SELECT * FROM users WHERE id=?", (uid_,)).fetchone())
 
 
 @app.post("/logout")
@@ -213,16 +415,21 @@ def logout():
 
 
 # ---------------------------------------------------------------- Daten
+def uid():
+    return g.user["id"]
+
+
 def plants():
     rows = db().execute(
-        "SELECT key, name, active, target, threshold FROM plants ORDER BY sort, key").fetchall()
+        "SELECT key, name, active, target, threshold FROM plants WHERE user_id=? ORDER BY sort, key",
+        (uid(),)).fetchall()
     return [{"key": r["key"], "name": r["name"], "active": bool(r["active"]),
              "target": r["target"], "threshold": r["threshold"]} for r in rows]
 
 
 def weigh_sessions():
     """Gruppiert nach Zeitstempel; neueste zuletzt."""
-    rows = db().execute("SELECT id, ts, plant, grams FROM weigh ORDER BY ts, id").fetchall()
+    rows = db().execute("SELECT id, ts, plant, grams FROM weigh WHERE user_id=? ORDER BY ts, id", (uid(),)).fetchall()
     sessions = {}
     for r in rows:
         s = sessions.setdefault(r["ts"], {"ts": r["ts"], "values": {}, "ids": []})
@@ -233,8 +440,8 @@ def weigh_sessions():
 
 def water_sessions():
     rows = db().execute(
-        "SELECT id, ts, plant, ml, ph, alfa, roots, extra FROM water ORDER BY ts, id"
-    ).fetchall()
+        "SELECT id, ts, plant, ml, ph, alfa, roots, extra FROM water WHERE user_id=? ORDER BY ts, id",
+        (uid(),)).fetchall()
     sessions = {}
     for r in rows:
         s = sessions.setdefault(
@@ -370,17 +577,17 @@ def state():
     except OSError:
         pass
     notes = [dict(r) for r in db().execute(
-        "SELECT id, ts, plant, text FROM note ORDER BY ts DESC, id DESC LIMIT 100")]
+        "SELECT id, ts, plant, text FROM note WHERE user_id=? ORDER BY ts DESC, id DESC LIMIT 100", (uid(),))]
     return jsonify(
         plants=plants(),
         weigh=with_deltas(weigh_sessions()),
         water=water_sessions(),
         notes=notes,
-        webhook=bool(WEBHOOK),
-        auth=bool(PASSWORD),
+        webhook=bool(g.user["webhook"]),
+        me={"username": g.user["username"], "role": g.user["role"]},
         assist=compute_assist(),
         settings=get_settings(),
-        last_backup=last_backup(),
+        last_backup=last_backup() if g.user["role"] == "admin" else None,
     )
 
 
@@ -407,10 +614,10 @@ def add_weigh():
     for k, v in (data.get("values") or {}).items():
         grams = to_int(v)
         if k in valid and grams and 100 < grams < 20000:
-            rows.append((ts, k, grams))
+            rows.append((uid(), ts, k, grams))
     if not rows:
         return jsonify(error="Keine gültigen Gewichte"), 400
-    db().executemany("INSERT INTO weigh(ts, plant, grams) VALUES (?,?,?)", rows)
+    db().executemany("INSERT INTO weigh(user_id, ts, plant, grams) VALUES (?,?,?,?)", rows)
     db().commit()
     return jsonify(ok=True, count=len(rows))
 
@@ -426,11 +633,11 @@ def add_water():
     for k, v in (data.get("ml") or {}).items():
         ml = to_int(v)
         if k in valid and ml and 0 < ml < 5000:
-            rows.append((ts, k, ml, ph, alfa, roots, extra))
+            rows.append((uid(), ts, k, ml, ph, alfa, roots, extra))
     if not rows:
         return jsonify(error="Keine gültigen ml-Werte"), 400
     db().executemany(
-        "INSERT INTO water(ts, plant, ml, ph, alfa, roots, extra) VALUES (?,?,?,?,?,?,?)", rows)
+        "INSERT INTO water(user_id, ts, plant, ml, ph, alfa, roots, extra) VALUES (?,?,?,?,?,?,?,?)", rows)
     db().commit()
     return jsonify(ok=True, count=len(rows))
 
@@ -442,8 +649,8 @@ def add_note():
     if not text:
         return jsonify(error="Leere Notiz"), 400
     plant = data.get("plant") or None
-    db().execute("INSERT INTO note(ts, plant, text) VALUES (?,?,?)",
-                 (iso(parse_ts(data.get("ts"))), plant, text))
+    db().execute("INSERT INTO note(user_id, ts, plant, text) VALUES (?,?,?,?)",
+                 (uid(), iso(parse_ts(data.get("ts"))), plant, text))
     db().commit()
     return jsonify(ok=True)
 
@@ -455,7 +662,8 @@ def delete(kind, ids):
         return jsonify(error="unbekannt"), 404
     id_list = [int(i) for i in ids.split(",") if i.isdigit()]
     if id_list:
-        db().execute(f"DELETE FROM {table} WHERE id IN ({','.join('?' * len(id_list))})", id_list)
+        db().execute(f"DELETE FROM {table} WHERE user_id=? AND id IN ({','.join('?' * len(id_list))})",
+                     [uid()] + id_list)
         db().commit()
     return jsonify(ok=True)
 
@@ -490,8 +698,8 @@ def add_plant():
     if key in taken:
         return jsonify(error=f"Kürzel {key} gibt es schon"), 400
     key = key or auto_key(name, taken)
-    nxt = db().execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM plants").fetchone()[0]
-    db().execute("INSERT INTO plants(key, name, sort, active) VALUES (?,?,?,1)", (key, name, nxt))
+    nxt = db().execute("SELECT COALESCE(MAX(sort), -1) + 1 FROM plants WHERE user_id=?", (uid(),)).fetchone()[0]
+    db().execute("INSERT INTO plants(user_id, key, name, sort, active) VALUES (?,?,?,?,1)", (uid(), key, name, nxt))
     db().commit()
     return jsonify(ok=True, key=key)
 
@@ -499,7 +707,7 @@ def add_plant():
 @app.put("/api/plants/<key>")
 def update_plant(key):
     data = request.get_json(force=True)
-    row = db().execute("SELECT * FROM plants WHERE key=?", (key,)).fetchone()
+    row = db().execute("SELECT * FROM plants WHERE user_id=? AND key=?", (uid(), key)).fetchone()
     if not row:
         return jsonify(error="Pflanze unbekannt"), 404
     name = (data["name"] if data.get("name") is not None else row["name"]).strip()[:60]
@@ -508,16 +716,16 @@ def update_plant(key):
     new_key = clean_key(data["key"]) if data.get("key") else key
     if not new_key:
         return jsonify(error="Kürzel ungültig"), 400
-    if new_key != key and db().execute("SELECT 1 FROM plants WHERE key=?", (new_key,)).fetchone():
+    if new_key != key and db().execute("SELECT 1 FROM plants WHERE user_id=? AND key=?", (uid(), new_key)).fetchone():
         return jsonify(error=f"Kürzel {new_key} gibt es schon"), 400
     active = row["active"] if data.get("active") is None else int(bool(data["active"]))
     target = to_int(data["target"]) if "target" in data else row["target"]
     threshold = to_int(data["threshold"]) if "threshold" in data else row["threshold"]
-    db().execute("UPDATE plants SET key=?, name=?, active=?, target=?, threshold=? WHERE key=?",
-                 (new_key, name, active, target, threshold, key))
+    db().execute("UPDATE plants SET key=?, name=?, active=?, target=?, threshold=? WHERE user_id=? AND key=?",
+                 (new_key, name, active, target, threshold, uid(), key))
     if new_key != key:
         for table in ("weigh", "water", "note"):
-            db().execute(f"UPDATE {table} SET plant=? WHERE plant=?", (new_key, key))
+            db().execute(f"UPDATE {table} SET plant=? WHERE user_id=? AND plant=?", (new_key, uid(), key))
     db().commit()
     return jsonify(ok=True)
 
@@ -525,15 +733,169 @@ def update_plant(key):
 @app.delete("/api/plants/<key>")
 def delete_plant(key):
     used = any(
-        db().execute(f"SELECT 1 FROM {t} WHERE plant=? LIMIT 1", (key,)).fetchone()
+        db().execute(f"SELECT 1 FROM {t} WHERE user_id=? AND plant=? LIMIT 1", (uid(), key)).fetchone()
         for t in ("weigh", "water", "note")
     )
     if used:  # Verlauf bleibt erhalten, Pflanze wird nur ausgeblendet
-        db().execute("UPDATE plants SET active=0 WHERE key=?", (key,))
+        db().execute("UPDATE plants SET active=0 WHERE user_id=? AND key=?", (uid(), key))
     else:
-        db().execute("DELETE FROM plants WHERE key=?", (key,))
+        db().execute("DELETE FROM plants WHERE user_id=? AND key=?", (uid(), key))
     db().commit()
     return jsonify(ok=True, archived=used)
+
+
+# ---------------------------------------------------------------- Konto / Admin
+@app.get("/api/me")
+def get_me():
+    return jsonify(username=g.user["username"], role=g.user["role"], webhook=bool(g.user["webhook"]))
+
+
+@app.put("/api/me")
+def put_me():
+    data = request.get_json(force=True)
+    resp = jsonify(ok=True)
+    if "webhook" in data:
+        hook = (data["webhook"] or "").strip()
+        if hook and not WEBHOOK_RE.fullmatch(hook):
+            return jsonify(error="Das ist keine gültige Discord-Webhook-Adresse."), 400
+        db().execute("UPDATE users SET webhook=? WHERE id=?", (hook or None, uid()))
+    if data.get("new_password"):
+        if not check_password_hash(g.user["pw_hash"], data.get("current_password") or ""):
+            return jsonify(error="Das aktuelle Passwort stimmt nicht."), 400
+        problem = password_problem(data["new_password"], g.user["username"])
+        if problem:
+            return jsonify(error=problem), 400
+        db().execute("UPDATE users SET pw_hash=? WHERE id=?", (generate_password_hash(data["new_password"]), uid()))
+        db().commit()
+        resp = with_session(resp, db().execute("SELECT * FROM users WHERE id=?", (uid(),)).fetchone())
+    db().commit()
+    return resp
+
+
+def user_json(r):
+    return {"id": r["id"], "username": r["username"], "role": r["role"],
+            "active": bool(r["active"]), "created": r["created"]}
+
+
+def other_admins(excluding):
+    return db().execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND id<>?",
+                        (excluding,)).fetchone()[0]
+
+
+@app.get("/api/config")
+@admin_required
+def get_config():
+    return jsonify(tz=CFG["tz"], trust_proxy=CFG["trust_proxy"])
+
+
+@app.put("/api/config")
+@admin_required
+def put_config():
+    global TZ
+    d = request.get_json(silent=True) or {}
+    if "tz" in d:
+        name = str(d["tz"]).strip()
+        try:
+            zone = ZoneInfo(name)
+        except Exception:
+            return jsonify(error="Unbekannte Zeitzone (z. B. Europe/Berlin)"), 400
+        TZ, CFG["tz"] = zone, name
+        db().execute("INSERT INTO config(key, value) VALUES ('tz', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (name,))
+    if "trust_proxy" in d:
+        CFG["trust_proxy"] = bool(d["trust_proxy"])
+        db().execute("INSERT INTO config(key, value) VALUES ('trust_proxy', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     ("1" if CFG["trust_proxy"] else "0",))
+    db().commit()
+    return jsonify(ok=True, tz=CFG["tz"], trust_proxy=CFG["trust_proxy"])
+
+
+@app.get("/api/users")
+@admin_required
+def list_users():
+    rows = db().execute("SELECT * FROM users ORDER BY id").fetchall()
+    invites = db().execute(
+        "SELECT token, created, expires FROM invites WHERE used_by IS NULL AND expires > ? ORDER BY created",
+        (iso(now_utc()),)).fetchall()
+    return jsonify(users=[user_json(r) for r in rows], invites=[dict(r) for r in invites])
+
+
+@app.post("/api/users")
+@admin_required
+def create_user_api():
+    data = request.get_json(force=True)
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not valid_username(username):
+        return jsonify(error="Benutzername: 3-32 Zeichen (Buchstaben, Zahlen, _ . -)."), 400
+    if db().execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+        return jsonify(error="Diesen Benutzernamen gibt es schon."), 400
+    problem = password_problem(password, username)
+    if problem:
+        return jsonify(error=problem), 400
+    role = "admin" if data.get("role") == "admin" else "user"
+    create_user(db(), username, password, role)
+    db().commit()
+    return jsonify(ok=True)
+
+
+@app.put("/api/users/<int:user_id>")
+@admin_required
+def update_user(user_id):
+    data = request.get_json(force=True)
+    row = db().execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return jsonify(error="Benutzer unbekannt"), 404
+    if user_id == uid() and (data.get("active") is False or data.get("role") == "user"):
+        return jsonify(error="Du kannst dich nicht selbst sperren oder herabstufen."), 400
+    if "active" in data:
+        db().execute("UPDATE users SET active=? WHERE id=?", (int(bool(data["active"])), user_id))
+    if data.get("role") in ("admin", "user"):
+        if data["role"] == "user" and row["role"] == "admin" and not other_admins(user_id):
+            return jsonify(error="Es muss mindestens einen Admin geben."), 400
+        db().execute("UPDATE users SET role=? WHERE id=?", (data["role"], user_id))
+    if data.get("password"):
+        problem = password_problem(data["password"], row["username"])
+        if problem:
+            return jsonify(error=problem), 400
+        db().execute("UPDATE users SET pw_hash=? WHERE id=?", (generate_password_hash(data["password"]), user_id))
+    db().commit()
+    return jsonify(ok=True)
+
+
+@app.delete("/api/users/<int:user_id>")
+@admin_required
+def delete_user(user_id):
+    row = db().execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not row:
+        return jsonify(error="Benutzer unbekannt"), 404
+    if user_id == uid():
+        return jsonify(error="Du kannst dich nicht selbst löschen."), 400
+    if row["role"] == "admin" and not other_admins(user_id):
+        return jsonify(error="Es muss mindestens einen Admin geben."), 400
+    for table in ("weigh", "water", "note", "plants", "settings"):
+        db().execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+    db().execute("DELETE FROM invites WHERE created_by=?", (user_id,))
+    db().execute("DELETE FROM users WHERE id=?", (user_id,))
+    db().commit()
+    return jsonify(ok=True)
+
+
+@app.post("/api/invites")
+@admin_required
+def create_invite():
+    token = secrets.token_urlsafe(24)
+    db().execute("INSERT INTO invites(token, created_by, created, expires) VALUES (?,?,?,?)",
+                 (token, uid(), iso(now_utc()), iso(now_utc() + timedelta(days=INVITE_DAYS))))
+    db().commit()
+    return jsonify(ok=True, token=token, path=f"/register?token={token}", days=INVITE_DAYS)
+
+
+@app.delete("/api/invites/<token>")
+@admin_required
+def delete_invite(token):
+    db().execute("DELETE FROM invites WHERE token=? AND used_by IS NULL", (token,))
+    db().commit()
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------- Einstellungen
@@ -542,7 +904,7 @@ SETTING_DEFAULTS = {"light_on": "17:00", "light_off": "11:00", "water_time": "17
 
 def get_settings():
     st = dict(SETTING_DEFAULTS)
-    for r in db().execute("SELECT key, value FROM settings"):
+    for r in db().execute("SELECT key, value FROM settings WHERE user_id=?", (uid(),)):
         if r["key"] in st:
             st[r["key"]] = r["value"]
     return st
@@ -556,8 +918,8 @@ def put_settings():
             v = str(data[k]).strip()
             if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
                 return jsonify(error=f"Ungültige Uhrzeit ({k})"), 400
-            db().execute("INSERT INTO settings(key, value) VALUES (?, ?) "
-                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+            db().execute("INSERT INTO settings(user_id, key, value) VALUES (?, ?, ?) "
+                         "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (uid(), k, v))
     db().commit()
     return jsonify(ok=True)
 
@@ -808,16 +1170,16 @@ def export_csv(kind):
     if kind == "weigh":
         header = ["Zeit", "Kürzel", "Pflanze", "Gramm"]
         rows = [[local_str(r["ts"]), r["plant"], names.get(r["plant"], ""), r["grams"]]
-                for r in db().execute("SELECT ts, plant, grams FROM weigh ORDER BY ts, id")]
+                for r in db().execute("SELECT ts, plant, grams FROM weigh WHERE user_id=? ORDER BY ts, id", (uid(),))]
     elif kind == "water":
         header = ["Zeit", "Kürzel", "Pflanze", "ml", "pH", "AlfaBoost ml/L", "Betta Roots ml/L", "Sonstiges"]
         rows = [[local_str(r["ts"]), r["plant"], names.get(r["plant"], ""), r["ml"],
                  de_num(r["ph"]), de_num(r["alfa"]), de_num(r["roots"]), r["extra"] or ""]
-                for r in db().execute("SELECT * FROM water ORDER BY ts, id")]
+                for r in db().execute("SELECT * FROM water WHERE user_id=? ORDER BY ts, id", (uid(),))]
     elif kind == "notes":
         header = ["Zeit", "Kürzel", "Notiz"]
         rows = [[local_str(r["ts"]), r["plant"] or "", r["text"]]
-                for r in db().execute("SELECT ts, plant, text FROM note ORDER BY ts, id")]
+                for r in db().execute("SELECT ts, plant, text FROM note WHERE user_id=? ORDER BY ts, id", (uid(),))]
     else:
         return jsonify(error="unbekannt"), 404
     buf = io.StringIO()
@@ -829,6 +1191,7 @@ def export_csv(kind):
 
 
 @app.get("/api/backup")
+@admin_required
 def backup_download():
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
@@ -840,6 +1203,7 @@ def backup_download():
 
 
 @app.post("/api/restore")
+@admin_required
 def restore():
     upload = request.files.get("file")
     if not upload:
@@ -877,12 +1241,13 @@ def discord_text():
 
 @app.post("/api/discord/post")
 def discord_post():
-    if not WEBHOOK:
-        return jsonify(error="DISCORD_WEBHOOK_URL nicht gesetzt"), 400
+    hook = g.user["webhook"]
+    if not hook or not WEBHOOK_RE.fullmatch(hook):
+        return jsonify(error="Kein Discord-Webhook hinterlegt (Tab Konto)"), 400
     data = request.get_json(silent=True) or {}
     text = data.get("text") or build_discord()
     req = urllib.request.Request(
-        WEBHOOK,
+        hook,
         data=json.dumps({"content": text[:1990]}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "GrowLog/1.0"},
     )
