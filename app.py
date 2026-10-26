@@ -4,10 +4,12 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
 import secrets
 import sqlite3
+import statistics
 import tempfile
 import time
 import urllib.error
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS note (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
   plant TEXT, text TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS i_weigh_ts ON weigh(ts);
 CREATE INDEX IF NOT EXISTS i_water_ts ON water(ts);
 """
@@ -376,6 +379,7 @@ def state():
         webhook=bool(WEBHOOK),
         auth=bool(PASSWORD),
         assist=compute_assist(),
+        settings=get_settings(),
         last_backup=last_backup(),
     )
 
@@ -532,13 +536,128 @@ def delete_plant(key):
     return jsonify(ok=True, archived=used)
 
 
+# ---------------------------------------------------------------- Einstellungen
+SETTING_DEFAULTS = {"light_on": "17:00", "light_off": "11:00", "water_time": "17:30"}
+
+
+def get_settings():
+    st = dict(SETTING_DEFAULTS)
+    for r in db().execute("SELECT key, value FROM settings"):
+        if r["key"] in st:
+            st[r["key"]] = r["value"]
+    return st
+
+
+@app.put("/api/settings")
+def put_settings():
+    data = request.get_json(force=True)
+    for k in SETTING_DEFAULTS:
+        if k in data:
+            v = str(data[k]).strip()
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+                return jsonify(error=f"Ungültige Uhrzeit ({k})"), 400
+            db().execute("INSERT INTO settings(key, value) VALUES (?, ?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+    db().commit()
+    return jsonify(ok=True)
+
+
 # ---------------------------------------------------------------- Gieß-Assistent
-def compute_assist():
-    """Richtwerte pro Pflanze: Ziel- und Schwellengewicht (auto aus dem letzten Gießen
-    oder manuell), Verbrauch pro 24 h, ml-Vorschlag und voraussichtlich nächstes Gießen."""
-    now = now_utc()
+def _hm(value):
+    h, m = value.split(":")
+    return int(h), int(m)
+
+
+def lit_hours(t0, t1, on, off):
+    """Stunden mit Licht zwischen zwei UTC-Zeitpunkten (Lichtfenster gilt in lokaler Zeit)."""
+    if t1 <= t0:
+        return 0.0
+    (oh, om), (fh, fm) = _hm(on), _hm(off)
+    total = 0.0
+    day = t0.astimezone(TZ).date() - timedelta(days=1)
+    last = t1.astimezone(TZ).date()
+    while day <= last:
+        start = datetime(day.year, day.month, day.day, oh, om, tzinfo=TZ).astimezone(timezone.utc)
+        end_day = day if (fh, fm) > (oh, om) else day + timedelta(days=1)
+        end = datetime(end_day.year, end_day.month, end_day.day, fh, fm, tzinfo=TZ).astimezone(timezone.utc)
+        lo, hi = max(t0, start), min(t1, end)
+        if hi > lo:
+            total += (hi - lo).total_seconds() / 3600
+        day += timedelta(days=1)
+    return total
+
+
+HALF_LIFE_DAYS = 2.0   # neuere Messungen zählen stärker
+DEFAULT_DARK_RATIO = 0.25
+DEFAULT_GROWTH = 0.03  # Verbrauchszuwachs pro Tag, wenn zu wenig Daten für eine Schätzung da sind
+
+
+def fit_model(intervals, now):
+    """intervals: {pflanze: [(ende, verlust_g, licht_h, dunkel_h)]}.
+    Verlust ≈ a · (licht_h + r · dunkel_h). a = Verbrauch pro Lichtstunde (neuere Messungen
+    stärker gewichtet), r = Dunkel/Licht-Verhältnis (gemeinsam geschätzt), k = Wachstum pro Tag."""
+    def wgt(end):
+        return 0.5 ** (max(0.0, (now - end).total_seconds() / 86400) / HALF_LIFE_DAYS)
+
+    def fit_a(rows, r):
+        num = sum(wgt(e) * (li + r * da) * loss for e, loss, li, da in rows)
+        den = sum(wgt(e) * (li + r * da) ** 2 for e, loss, li, da in rows)
+        return (num / den) if den > 0 else None
+
+    rows_total = sum(len(v) for v in intervals.values())
+    r = DEFAULT_DARK_RATIO
+    if rows_total >= 8:
+        best = None
+        for cand in [x / 20 for x in range(1, 13)]:  # 0,05 … 0,60
+            sse = 0.0
+            for rows in intervals.values():
+                a = fit_a(rows, cand)
+                if a is not None:
+                    sse += sum(wgt(e) * (loss - a * (li + cand * da)) ** 2 for e, loss, li, da in rows)
+            if best is None or sse < best[0]:
+                best = (sse, cand)
+        r = best[1]
+
+    slopes = []
+    for rows in intervals.values():
+        pts = [((e - now).total_seconds() / 86400, math.log(loss / (li + r * da)))
+               for e, loss, li, da in rows if li + r * da >= 4 and loss > 0]
+        if len(pts) >= 3 and pts[-1][0] - pts[0][0] >= 1.5:
+            mx = sum(x for x, _ in pts) / len(pts)
+            my = sum(y for _, y in pts) / len(pts)
+            var = sum((x - mx) ** 2 for x, _ in pts)
+            if var > 0:
+                slopes.append(sum((x - mx) * (y - my) for x, y in pts) / var)
+    k = max(0.0, min(0.10, statistics.median(slopes))) if slopes else DEFAULT_GROWTH
+    return {key: fit_a(rows, r) for key, rows in intervals.items()}, r, k
+
+
+def project(cur, start, a, r, k, st, days=7):
+    """Erwartetes Gewicht in 15-Minuten-Schritten ab der Messung (Licht/Dunkel, Wachstum)."""
+    pts, t, w = [], start, float(cur)
+    step = timedelta(minutes=15)
+    for _ in range(days * 96):
+        t2 = t + step
+        lit = lit_hours(t, t2, st["light_on"], st["light_off"])
+        growth = math.exp(k * (t - start).total_seconds() / 86400)
+        w -= a * growth * (lit + r * (0.25 - lit))
+        t = t2
+        pts.append((t, w))
+    return pts
+
+
+def weight_at(pts, start, when):
+    idx = int((when - start).total_seconds() // 900) - 1
+    return pts[max(0, min(len(pts) - 1, idx))][1]
+
+
+def compute_assist(now=None):
+    """Richtwerte pro Pflanze: Ziel-/Schwellengewicht (auto oder manuell), Verbrauch getrennt
+    nach Licht/Dunkel, Prognose, empfohlener Gießtermin und ml-Vorschlag."""
+    now = now or now_utc()
+    st = get_settings()
     sessions, waters = weigh_sessions(), water_sessions()
-    out = {}
+    info, intervals = {}, {}
     for p in plants():
         if not p["active"]:
             continue
@@ -546,53 +665,96 @@ def compute_assist():
         entries = [(s["ts"], s["values"][k]) for s in sessions if k in s["values"]]
         if not entries:
             continue
-        wts = [w["ts"] for w in waters if k in w["ml"]]
+        wlist = [w for w in waters if k in w["ml"]]
         post, prev = [], ""
         for ts, _g in entries:
-            post.append(any(prev < wt <= ts for wt in wts))  # erste Messung nach dem Gießen
+            post.append(any(prev < w["ts"] <= ts for w in wlist))  # erste Messung nach dem Gießen
             prev = ts
-        cur_ts, cur = entries[-1]
 
         auto_target = auto_thr = None
         for i in range(len(entries) - 1, -1, -1):
             if post[i]:
                 auto_target = entries[i][1]
-                if i > 0:
-                    gap = (parse_ts(entries[i][0]) - parse_ts(entries[i - 1][0])).total_seconds() / 3600
-                    if gap <= 36:
-                        auto_thr = entries[i - 1][1]
+                if i > 0 and (parse_ts(entries[i][0]) - parse_ts(entries[i - 1][0])).total_seconds() <= 36 * 3600:
+                    auto_thr = entries[i - 1][1]
                 break
-        target = p["target"] or auto_target
-        threshold = p["threshold"] or auto_thr
 
-        loss = hours = 0.0
+        ratios = []  # gemessene g Zuwachs pro ml
+        for i in range(1, len(entries)):
+            if post[i] and (parse_ts(entries[i][0]) - parse_ts(entries[i - 1][0])).total_seconds() <= 6 * 3600:
+                ml = sum(w["ml"][k] for w in wlist if entries[i - 1][0] < w["ts"] <= entries[i][0])
+                gain = entries[i][1] - entries[i - 1][1]
+                if ml > 0 and gain > 0:
+                    ratios.append(gain / ml)
+        ratio = max(0.8, min(1.3, statistics.median(ratios))) if ratios else 1.0
+
+        rows = []
         for i in range(1, len(entries)):
             if post[i]:
                 continue
-            dt_end = parse_ts(entries[i][0])
-            h = (dt_end - parse_ts(entries[i - 1][0])).total_seconds() / 3600
-            if h <= 0 or (now - dt_end).total_seconds() > 4 * 86400:
-                continue
-            loss += entries[i - 1][1] - entries[i][1]
-            hours += h
-        use24 = round(loss / hours * 24) if hours >= 6 and loss > 0 else None
+            t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
+            hrs = (t1 - t0).total_seconds() / 3600
+            loss = entries[i - 1][1] - entries[i][1]
+            if hrs >= 3 and loss >= 0 and (now - t1).total_seconds() <= 10 * 86400:
+                lit = lit_hours(t0, t1, st["light_on"], st["light_off"])
+                rows.append((t1, loss, lit, hrs - lit))
+        if rows:
+            intervals[k] = rows
+        info[k] = {"plant": p, "entries": entries, "ratio": ratio,
+                   "auto_target": auto_target, "auto_thr": auto_thr}
 
-        hours_left = due_at = None
-        if threshold and use24:
-            elapsed = (now - parse_ts(cur_ts)).total_seconds() / 3600
-            hours_left = max(0.0, (cur - threshold) / use24 * 24 - elapsed)
-            due_at = iso(now + timedelta(hours=hours_left))
-        pct = None
-        if target and threshold and target > threshold:
-            pct = max(0, min(100, round((cur - threshold) / (target - threshold) * 100)))
-        out[k] = {
+    rates, r, growth = fit_model(intervals, now) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
+
+    out = {}
+    for k, d in info.items():
+        p, entries, ratio = d["plant"], d["entries"], d["ratio"]
+        cur_ts, cur = entries[-1]
+        start = parse_ts(cur_ts)
+        target = p["target"] or d["auto_target"]
+        threshold = p["threshold"] or d["auto_thr"]
+        a = rates.get(k)
+        res = {
             "current": cur, "current_ts": cur_ts,
-            "target": target, "target_manual": bool(p["target"]), "auto_target": auto_target,
-            "threshold": threshold, "threshold_manual": bool(p["threshold"]), "auto_threshold": auto_thr,
-            "use24": use24, "hours_left": None if hours_left is None else round(hours_left, 1),
-            "due_at": due_at, "pct": pct,
-            "suggest_ml": int(round((target - cur) / 5.0) * 5) if target and cur < target - 5 else 0,
+            "target": target, "target_manual": bool(p["target"]), "auto_target": d["auto_target"],
+            "threshold": threshold, "threshold_manual": bool(p["threshold"]), "auto_threshold": d["auto_thr"],
+            "ratio": round(ratio, 2), "use24": None, "rate_lit": None, "rate_dark": None,
+            "hours_left": None, "due_at": None, "pct": None,
+            "slot_at": None, "slot_expected": None, "slot_today": None, "suggest_ml": 0,
         }
+        if target and threshold and target > threshold:
+            res["pct"] = max(0, min(100, round((cur - threshold) / (target - threshold) * 100)))
+        if a:
+            pts = project(cur, start, a, r, growth, st)
+            lit24 = lit_hours(now, now + timedelta(hours=24), st["light_on"], st["light_off"])
+            res["rate_lit"], res["rate_dark"] = round(a, 1), round(a * r, 1)
+            res["use24"] = round(a * (lit24 + r * (24 - lit24)))
+            if threshold:
+                hit = next((t for t, w in pts if w <= threshold), None)
+                if hit:
+                    res["due_at"] = iso(hit)
+                    res["hours_left"] = round(max(0.0, (hit - now).total_seconds() / 3600), 1)
+            # Gießtermin: letzter Termin, bevor die Schwelle vor dem nächsten Termin erreicht würde
+            wh, wm = _hm(st["water_time"])
+            nl = now.astimezone(TZ)
+            slot = datetime(nl.year, nl.month, nl.day, wh, wm, tzinfo=TZ).astimezone(timezone.utc)
+            if slot < now:
+                slot += timedelta(days=1)
+            chosen = None
+            for j in range(5):
+                s_j = datetime.fromtimestamp(slot.timestamp() + j * 86400, timezone.utc)
+                if threshold and weight_at(pts, start, s_j + timedelta(hours=24)) <= threshold:
+                    chosen = s_j
+                    break
+            if chosen is None:
+                chosen = slot
+            expected = weight_at(pts, start, chosen)
+            res["slot_at"], res["slot_expected"] = iso(chosen), round(expected)
+            res["slot_today"] = chosen.astimezone(TZ).date() == nl.date()
+            if target and expected < target - 5:
+                res["suggest_ml"] = int(round((target - expected) / ratio / 5.0) * 5)
+        elif target and cur < target - 5:
+            res["suggest_ml"] = int(round((target - cur) / ratio / 5.0) * 5)
+        out[k] = res
     return out
 
 

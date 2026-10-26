@@ -62,11 +62,18 @@ umbenennen oder entfernen. Pflanzen mit Einträgen werden nur archiviert, der Ve
 
 ## Gieß-Übersicht (Richtwerte)
 
-Im Tab "Wiegen" zeigt die App pro Pflanze, wie voll der Topf noch ist, den Verbrauch pro Tag und wann die
-Schwelle voraussichtlich erreicht ist. Ziel- und Schwellengewicht werden automatisch aus dem letzten Gießen
-übernommen (Ziel = erste Messung nach dem Gießen, Schwelle = Messung davor). Im Tab "Pflanzen" kannst du beide
-Werte selbst festlegen. Beim Eintragen eines Gewichts siehst du sofort die ml bis zum Ziel, im Tab "Gießen"
-übernimmt ein Tipp auf "Vorschlag" die Menge. Das sind Richtwerte, der Fingertest entscheidet.
+Im Tab "Wiegen" zeigt die App pro Pflanze den Füllstand, den Verbrauch und einen Gießtermin mit ml-Vorschlag.
+
+- **Verbrauch** wird aus deinen Messungen berechnet, aber nicht als Tagesdurchschnitt: Licht- und Dunkelphase werden
+  getrennt betrachtet (Zeiten im Tab "Pflanzen" unter "Zeiten"), neuere Messungen zählen stärker (Halbwertszeit 2 Tage)
+  und ein Wachstumstrend wird eingerechnet. Daraus entsteht eine Prognose in 15-Minuten-Schritten.
+- **Ziel- und Schwellengewicht** kommen automatisch aus dem letzten Gießen (Ziel = erste Messung danach,
+  Schwelle = Messung davor) oder werden im Tab "Pflanzen" von Hand gesetzt.
+- **Gießtermin:** der letzte deiner Gießzeitpunkte (Standard 17:30), bevor die Schwelle vor dem nächsten erreicht würde.
+- **ml-Vorschlag:** (Ziel − erwartetes Gewicht zum Gießzeitpunkt) / gemessenes Verhältnis g pro ml aus deinen bisherigen
+  Gießvorgängen. Beim Eintippen eines Gewichts siehst du sofort die ml bis zum Ziel.
+
+Das sind Richtwerte, der Fingertest entscheidet.
 
 ## Export und Backup
 
@@ -76,3 +83,13 @@ Im Tab "Pflanzen" unter "Daten & Backup":
 - Backup als `.db`-Datei herunterladen und über "Aus Backup wiederherstellen" wieder einspielen
   (vorher wird automatisch eine Kopie `vor-restore-…` angelegt).
 - Automatisch: einmal pro Tag eine Kopie in `data/backups/` (die letzten 14 bleiben).
+
+## Image aus GitHub (ghcr.io) in Portainer nutzen
+
+1. GitHub → Profil → Packages → `growlog` → Package settings → Sichtbarkeit auf "Public" stellen
+   (privat geht auch, dann in Schritt 2 Anmeldedaten mit einem Token `read:packages` eintragen).
+2. Portainer → Registries → Add registry → Custom registry: Name `ghcr`, URL `ghcr.io`.
+3. Bestehenden Container öffnen → Duplicate/Edit → Image `ghcr.io/igridz/growlog:latest` → Deploy the container (Replace).
+   Ports, Umgebungsvariablen und Volumes bleiben erhalten, die Daten liegen im Volume bzw. Ordner `data`.
+   Der Container-Port ist 8087 (nicht mehr 8080).
+4. Spätere Updates: Container → Recreate → "Pull latest image version" aktivieren.

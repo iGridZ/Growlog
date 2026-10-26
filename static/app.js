@@ -45,10 +45,9 @@ const sign = (n) => (n > 0 ? "+" + n : String(n));
 const r5 = (n) => Math.round(n / 5) * 5;
 const dnum = (n) => String(n).replace(".", ",");
 const autoVal = (k, f) => ((S.assist || {})[k] || {})[f];
-function dueText(a) {
-  if (a.hours_left < 1) return "jetzt prüfen";
-  if (a.hours_left < 36) return `in ~${Math.round(a.hours_left)} h (${fmtTs(a.due_at)})`;
-  return `in ~${dnum((a.hours_left / 24).toFixed(1))} Tagen (${fmtTs(a.due_at)})`;
+function slotText(a) {
+  const t = fmtTs(a.slot_at);
+  return a.slot_today ? `heute ${t.slice(-5)}` : t;
 }
 function renderAssist() {
   const rows = act().filter((p) => (S.assist || {})[p.key]);
@@ -58,13 +57,14 @@ function renderAssist() {
     const bits = [];
     if (a.target) bits.push(`Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}`);
     if (a.threshold) bits.push(`Schwelle ${a.threshold} g${a.threshold_manual ? "" : " (auto)"}`);
-    if (a.use24) bits.push(`Ø −${a.use24} g/Tag`);
     return `<div class="as"><div class="as-head"><span><b>${esc(p.key)}</b> ${a.current} g</span>` +
       `<span class="muted">${a.pct != null ? a.pct + " %" : ""}</span></div>` +
       (a.pct != null ? `<div class="bar ${a.pct < 25 ? "low" : ""}"><i style="width:${a.pct}%"></i></div>` : "") +
       `<small>${bits.join(" · ")}</small>` +
-      (a.hours_left != null ? `<div class="as-due">Gießen laut Richtwert ${dueText(a)}</div>` : "") + `</div>`;
-  }).join("") + '<p class="hint">Richtwerte aus deinem letzten Gießen, der Fingertest entscheidet. Ziel und Schwelle kannst du im Tab „Pflanzen“ selbst setzen.</p>';
+      (a.rate_lit != null ? `<small>Verbrauch: Licht ~${dnum(a.rate_lit)} g/h · Dunkel ~${dnum(a.rate_dark)} g/h · ≈ ${a.use24} g/Tag</small>` : "") +
+      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") +
+      (a.due_at ? `<small>Schwelle erreicht laut Modell: ${fmtTs(a.due_at)}</small>` : "") + `</div>`;
+  }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Der Fingertest entscheidet. Ziel und Schwelle kannst du im Tab „Pflanzen“ selbst setzen.</p>';
 }
 
 // ---------- Tabs
@@ -105,7 +105,7 @@ function liveDelta() {
     const at = new Date($("#w-ts").value).getTime() || Date.now();
     const h = ((at - new Date(lw.ts)) / 36e5).toFixed(0);
     const A = (S.assist || {})[i.dataset.k];
-    const ml = A && A.target && v < A.target - 5 ? ` · ${r5(A.target - v)} ml bis Ziel` : "";
+    const ml = A && A.target && v < A.target - 5 ? ` · ${r5((A.target - v) / (A.ratio || 1))} ml bis Ziel` : "";
     el.textContent = `${sign(d)} g in ~${h} h${ml}`;
     el.className = "delta " + (d < 0 ? "neg" : "pos");
   });
@@ -314,6 +314,11 @@ async function load() {
   renderWeighForm();
   renderWaterForm();
   renderAssist();
+  if (S.settings) {
+    $("#s-on").value = S.settings.light_on;
+    $("#s-off").value = S.settings.light_off;
+    $("#s-water").value = S.settings.water_time;
+  }
   $("#backup-hint").textContent = S.last_backup
     ? `Automatisches Tages-Backup in data/backups (14 Tage), zuletzt ${S.last_backup}.` : "";
   $("#n-plant").innerHTML = '<option value="">alle</option>' + act().map((p) => `<option>${p.key}</option>`).join("");
@@ -324,6 +329,13 @@ async function load() {
     document.querySelector('nav button[data-tab="plants"]').click();
   }
 }
+$("#s-save").onclick = async () => {
+  try {
+    await api("/api/settings", "PUT", { light_on: $("#s-on").value, light_off: $("#s-off").value, water_time: $("#s-water").value });
+    toast("Zeiten gespeichert");
+    await load();
+  } catch (e) { toast(e.message, true); }
+};
 $("#restore").onchange = async (e) => {
   const f = e.target.files[0];
   if (!f) return;

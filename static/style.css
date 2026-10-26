@@ -87,3 +87,4 @@ button.sug { padding: 2px 0; text-align: left; }
 .btns2 .wide { grid-column: 1 / -1; }
 .btn { display: block; margin: 0; text-decoration: none; text-align: center; background: var(--bg); color: var(--text);
   border: 1px solid var(--line); border-radius: 10px; padding: 12px 10px; font-size: .95rem; cursor: pointer; }
+.as small { display: block; }
