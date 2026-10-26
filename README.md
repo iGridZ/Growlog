@@ -59,3 +59,20 @@ GitHub-Einstellungen auf öffentlich stellen.
 
 Pflanzen legst du direkt in der App im Tab "Pflanzen" an (Name, optional Kürzel). Dort kannst du sie auch
 umbenennen oder entfernen. Pflanzen mit Einträgen werden nur archiviert, der Verlauf bleibt erhalten.
+
+## Gieß-Übersicht (Richtwerte)
+
+Im Tab "Wiegen" zeigt die App pro Pflanze, wie voll der Topf noch ist, den Verbrauch pro Tag und wann die
+Schwelle voraussichtlich erreicht ist. Ziel- und Schwellengewicht werden automatisch aus dem letzten Gießen
+übernommen (Ziel = erste Messung nach dem Gießen, Schwelle = Messung davor). Im Tab "Pflanzen" kannst du beide
+Werte selbst festlegen. Beim Eintragen eines Gewichts siehst du sofort die ml bis zum Ziel, im Tab "Gießen"
+übernimmt ein Tipp auf "Vorschlag" die Menge. Das sind Richtwerte, der Fingertest entscheidet.
+
+## Export und Backup
+
+Im Tab "Pflanzen" unter "Daten & Backup":
+
+- CSV-Export für Gewichte, Gießen und Notizen (Excel-tauglich: Semikolon, Dezimalkomma, UTF-8).
+- Backup als `.db`-Datei herunterladen und über "Aus Backup wiederherstellen" wieder einspielen
+  (vorher wird automatisch eine Kopie `vor-restore-…` angelegt).
+- Automatisch: einmal pro Tag eine Kopie in `data/backups/` (die letzten 14 bleiben).

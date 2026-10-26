@@ -42,6 +42,30 @@ const lastWeigh = (key) => {
   return null;
 };
 const sign = (n) => (n > 0 ? "+" + n : String(n));
+const r5 = (n) => Math.round(n / 5) * 5;
+const dnum = (n) => String(n).replace(".", ",");
+const autoVal = (k, f) => ((S.assist || {})[k] || {})[f];
+function dueText(a) {
+  if (a.hours_left < 1) return "jetzt prüfen";
+  if (a.hours_left < 36) return `in ~${Math.round(a.hours_left)} h (${fmtTs(a.due_at)})`;
+  return `in ~${dnum((a.hours_left / 24).toFixed(1))} Tagen (${fmtTs(a.due_at)})`;
+}
+function renderAssist() {
+  const rows = act().filter((p) => (S.assist || {})[p.key]);
+  $("#assist-card").hidden = !rows.length;
+  $("#assist").innerHTML = rows.map((p) => {
+    const a = S.assist[p.key];
+    const bits = [];
+    if (a.target) bits.push(`Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}`);
+    if (a.threshold) bits.push(`Schwelle ${a.threshold} g${a.threshold_manual ? "" : " (auto)"}`);
+    if (a.use24) bits.push(`Ø −${a.use24} g/Tag`);
+    return `<div class="as"><div class="as-head"><span><b>${esc(p.key)}</b> ${a.current} g</span>` +
+      `<span class="muted">${a.pct != null ? a.pct + " %" : ""}</span></div>` +
+      (a.pct != null ? `<div class="bar ${a.pct < 25 ? "low" : ""}"><i style="width:${a.pct}%"></i></div>` : "") +
+      `<small>${bits.join(" · ")}</small>` +
+      (a.hours_left != null ? `<div class="as-due">Gießen laut Richtwert ${dueText(a)}</div>` : "") + `</div>`;
+  }).join("") + '<p class="hint">Richtwerte aus deinem letzten Gießen, der Fingertest entscheidet. Ziel und Schwelle kannst du im Tab „Pflanzen“ selbst setzen.</p>';
+}
 
 // ---------- Tabs
 document.querySelectorAll("nav button").forEach((b) =>
@@ -80,7 +104,9 @@ function liveDelta() {
     const d = v - lw.values[i.dataset.k];
     const at = new Date($("#w-ts").value).getTime() || Date.now();
     const h = ((at - new Date(lw.ts)) / 36e5).toFixed(0);
-    el.textContent = `${sign(d)} g in ~${h} h`;
+    const A = (S.assist || {})[i.dataset.k];
+    const ml = A && A.target && v < A.target - 5 ? ` · ${r5(A.target - v)} ml bis Ziel` : "";
+    el.textContent = `${sign(d)} g in ~${h} h${ml}`;
     el.className = "delta " + (d < 0 ? "neg" : "pos");
   });
 }
@@ -104,13 +130,18 @@ function renderWaterForm() {
   $("#g-fields").innerHTML = !act().length ? NOPLANTS : act()
     .map((p) => {
       const lastW = [...S.water].reverse().find((w) => p.key in w.ml);
+      const A = (S.assist || {})[p.key];
       return `<div class="plant"><div class="name"><b>${p.key}</b><small>${p.name}${
         lastW ? ` · zuletzt ${lastW.ml[p.key]} ml` : ""
-      }</small></div>
+      }</small>${A && A.suggest_ml > 0 ? `<div><button type="button" class="link sug" data-sug="${p.key}" data-ml="${A.suggest_ml}">Vorschlag ${A.suggest_ml} ml</button></div>` : ""}</div>
       <input type="number" inputmode="numeric" data-k="${p.key}" placeholder="ml" value="${keep[p.key] || ""}"></div>`;
     })
     .join("");
   document.querySelectorAll("#g-fields input").forEach((i) => i.addEventListener("input", calcMix));
+  document.querySelectorAll("[data-sug]").forEach((b) => (b.onclick = () => {
+    document.querySelector(`#g-fields input[data-k="${b.dataset.sug}"]`).value = b.dataset.ml;
+    calcMix();
+  }));
   calcMix();
 }
 function calcMix() {
@@ -208,7 +239,11 @@ function renderPlants() {
     `<div class="item prow"><input class="pn" data-k="${esc(p.key)}" value="${esc(p.name)}" maxlength="60">` +
     `<input class="pk" data-k="${esc(p.key)}" value="${esc(p.key)}" maxlength="6">` +
     `<button data-psave="${esc(p.key)}" title="Speichern">💾</button>` +
-    `<button data-prm="${esc(p.key)}" title="Entfernen">🗑</button></div>`
+    `<button data-prm="${esc(p.key)}" title="Entfernen">🗑</button>` +
+    `<div class="prow2"><input class="pt" type="number" inputmode="numeric" data-k="${esc(p.key)}" value="${p.target || ""}" ` +
+    `placeholder="Ziel${autoVal(p.key, "auto_target") ? " (auto " + autoVal(p.key, "auto_target") + ")" : ""}">` +
+    `<input class="pth" type="number" inputmode="numeric" data-k="${esc(p.key)}" value="${p.threshold || ""}" ` +
+    `placeholder="Schwelle${autoVal(p.key, "auto_threshold") ? " (auto " + autoVal(p.key, "auto_threshold") + ")" : ""}"></div></div>`
   ).join("") || '<p class="empty">Noch keine Pflanzen. Lege oben die erste an.</p>';
   $("#p-arch-card").hidden = !arch.length;
   $("#p-arch").innerHTML = arch.map((p) =>
@@ -218,7 +253,11 @@ function renderPlants() {
     const k = b.dataset.psave;
     const name = document.querySelector(`.pn[data-k="${k}"]`).value;
     const key = document.querySelector(`.pk[data-k="${k}"]`).value;
-    try { await api("/api/plants/" + encodeURIComponent(k), "PUT", { name, key }); toast("Gespeichert"); await load(); }
+    try { await api("/api/plants/" + encodeURIComponent(k), "PUT", {
+      name, key,
+      target: document.querySelector(`.pt[data-k="${k}"]`).value,
+      threshold: document.querySelector(`.pth[data-k="${k}"]`).value,
+    }); toast("Gespeichert"); await load(); }
     catch (e) { toast(e.message, true); }
   }));
   document.querySelectorAll("[data-prm]").forEach((b) => (b.onclick = async () => {
@@ -274,6 +313,9 @@ async function load() {
   } catch (e) { $("#status").textContent = "offline"; return; }
   renderWeighForm();
   renderWaterForm();
+  renderAssist();
+  $("#backup-hint").textContent = S.last_backup
+    ? `Automatisches Tages-Backup in data/backups (14 Tage), zuletzt ${S.last_backup}.` : "";
   $("#n-plant").innerHTML = '<option value="">alle</option>' + act().map((p) => `<option>${p.key}</option>`).join("");
   if ($("#tab-log").classList.contains("active")) renderLog();
   if ($("#tab-plants").classList.contains("active")) renderPlants();
@@ -282,6 +324,25 @@ async function load() {
     document.querySelector('nav button[data-tab="plants"]').click();
   }
 }
+$("#restore").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (!confirm("Alle aktuellen Daten durch diese Sicherung ersetzen? Vorher wird automatisch eine Kopie angelegt.")) {
+    e.target.value = "";
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    const r = await fetch("/api/restore", { method: "POST", body: fd });
+    if (r.status === 401) return (window.location.href = "/login");
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || "Fehler beim Wiederherstellen");
+    toast("Wiederhergestellt");
+    await load();
+  } catch (err) { toast(err.message, true); }
+  e.target.value = "";
+};
 $("#logout").onclick = async () => {
   if (!confirm("Abmelden?")) return;
   await fetch("/logout", { method: "POST" });

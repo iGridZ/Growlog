@@ -1,18 +1,21 @@
 """GrowLog – kleines Grow-Tagebuch: Wiegen, Gießen (ml), Notizen, Discord-Export."""
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from flask import Flask, Response, g, jsonify, redirect, request, send_from_directory
+from flask import Flask, Response, g, jsonify, redirect, request, send_file, send_from_directory
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -25,13 +28,14 @@ WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # Restore-Upload
 if os.environ.get("TRUST_PROXY", "1") == "1":  # hinter Nginx Proxy Manager: echte IP und https übernehmen
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS plants (
   key TEXT PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1, target INTEGER, threshold INTEGER
 );
 CREATE TABLE IF NOT EXISTS weigh (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,
@@ -73,6 +77,9 @@ def init_db():
     cols = [r[1] for r in conn.execute("PRAGMA table_info(plants)")]
     if "active" not in cols:  # Migration für Datenbanken aus Version 1
         conn.execute("ALTER TABLE plants ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+    for col in ("target", "threshold"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE plants ADD COLUMN {col} INTEGER")
     conn.commit()
     conn.close()
 
@@ -204,8 +211,10 @@ def logout():
 
 # ---------------------------------------------------------------- Daten
 def plants():
-    rows = db().execute("SELECT key, name, active FROM plants ORDER BY sort, key").fetchall()
-    return [{"key": r["key"], "name": r["name"], "active": bool(r["active"])} for r in rows]
+    rows = db().execute(
+        "SELECT key, name, active, target, threshold FROM plants ORDER BY sort, key").fetchall()
+    return [{"key": r["key"], "name": r["name"], "active": bool(r["active"]),
+             "target": r["target"], "threshold": r["threshold"]} for r in rows]
 
 
 def weigh_sessions():
@@ -353,6 +362,10 @@ def sw():
 
 @app.get("/api/state")
 def state():
+    try:
+        ensure_daily_backup()
+    except OSError:
+        pass
     notes = [dict(r) for r in db().execute(
         "SELECT id, ts, plant, text FROM note ORDER BY ts DESC, id DESC LIMIT 100")]
     return jsonify(
@@ -362,6 +375,8 @@ def state():
         notes=notes,
         webhook=bool(WEBHOOK),
         auth=bool(PASSWORD),
+        assist=compute_assist(),
+        last_backup=last_backup(),
     )
 
 
@@ -492,7 +507,10 @@ def update_plant(key):
     if new_key != key and db().execute("SELECT 1 FROM plants WHERE key=?", (new_key,)).fetchone():
         return jsonify(error=f"Kürzel {new_key} gibt es schon"), 400
     active = row["active"] if data.get("active") is None else int(bool(data["active"]))
-    db().execute("UPDATE plants SET key=?, name=?, active=? WHERE key=?", (new_key, name, active, key))
+    target = to_int(data["target"]) if "target" in data else row["target"]
+    threshold = to_int(data["threshold"]) if "threshold" in data else row["threshold"]
+    db().execute("UPDATE plants SET key=?, name=?, active=?, target=?, threshold=? WHERE key=?",
+                 (new_key, name, active, target, threshold, key))
     if new_key != key:
         for table in ("weigh", "water", "note"):
             db().execute(f"UPDATE {table} SET plant=? WHERE plant=?", (new_key, key))
@@ -512,6 +530,182 @@ def delete_plant(key):
         db().execute("DELETE FROM plants WHERE key=?", (key,))
     db().commit()
     return jsonify(ok=True, archived=used)
+
+
+# ---------------------------------------------------------------- Gieß-Assistent
+def compute_assist():
+    """Richtwerte pro Pflanze: Ziel- und Schwellengewicht (auto aus dem letzten Gießen
+    oder manuell), Verbrauch pro 24 h, ml-Vorschlag und voraussichtlich nächstes Gießen."""
+    now = now_utc()
+    sessions, waters = weigh_sessions(), water_sessions()
+    out = {}
+    for p in plants():
+        if not p["active"]:
+            continue
+        k = p["key"]
+        entries = [(s["ts"], s["values"][k]) for s in sessions if k in s["values"]]
+        if not entries:
+            continue
+        wts = [w["ts"] for w in waters if k in w["ml"]]
+        post, prev = [], ""
+        for ts, _g in entries:
+            post.append(any(prev < wt <= ts for wt in wts))  # erste Messung nach dem Gießen
+            prev = ts
+        cur_ts, cur = entries[-1]
+
+        auto_target = auto_thr = None
+        for i in range(len(entries) - 1, -1, -1):
+            if post[i]:
+                auto_target = entries[i][1]
+                if i > 0:
+                    gap = (parse_ts(entries[i][0]) - parse_ts(entries[i - 1][0])).total_seconds() / 3600
+                    if gap <= 36:
+                        auto_thr = entries[i - 1][1]
+                break
+        target = p["target"] or auto_target
+        threshold = p["threshold"] or auto_thr
+
+        loss = hours = 0.0
+        for i in range(1, len(entries)):
+            if post[i]:
+                continue
+            dt_end = parse_ts(entries[i][0])
+            h = (dt_end - parse_ts(entries[i - 1][0])).total_seconds() / 3600
+            if h <= 0 or (now - dt_end).total_seconds() > 4 * 86400:
+                continue
+            loss += entries[i - 1][1] - entries[i][1]
+            hours += h
+        use24 = round(loss / hours * 24) if hours >= 6 and loss > 0 else None
+
+        hours_left = due_at = None
+        if threshold and use24:
+            elapsed = (now - parse_ts(cur_ts)).total_seconds() / 3600
+            hours_left = max(0.0, (cur - threshold) / use24 * 24 - elapsed)
+            due_at = iso(now + timedelta(hours=hours_left))
+        pct = None
+        if target and threshold and target > threshold:
+            pct = max(0, min(100, round((cur - threshold) / (target - threshold) * 100)))
+        out[k] = {
+            "current": cur, "current_ts": cur_ts,
+            "target": target, "target_manual": bool(p["target"]), "auto_target": auto_target,
+            "threshold": threshold, "threshold_manual": bool(p["threshold"]), "auto_threshold": auto_thr,
+            "use24": use24, "hours_left": None if hours_left is None else round(hours_left, 1),
+            "due_at": due_at, "pct": pct,
+            "suggest_ml": int(round((target - cur) / 5.0) * 5) if target and cur < target - 5 else 0,
+        }
+    return out
+
+
+# ---------------------------------------------------------------- Export / Backup
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH) or ".", "backups")
+BACKUP_KEEP = 14
+
+
+def backup_to(path):
+    src, dst = sqlite3.connect(DB_PATH), sqlite3.connect(path)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def backup_files():
+    if not os.path.isdir(BACKUP_DIR):
+        return []
+    return sorted(f for f in os.listdir(BACKUP_DIR) if re.fullmatch(r"growlog-\d{4}-\d\d-\d\d\.db", f))
+
+
+def ensure_daily_backup():
+    day = datetime.now(TZ).strftime("%Y-%m-%d")
+    path = os.path.join(BACKUP_DIR, f"growlog-{day}.db")
+    if os.path.exists(path):
+        return
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    backup_to(path)
+    for old in backup_files()[:-BACKUP_KEEP]:
+        os.unlink(os.path.join(BACKUP_DIR, old))
+
+
+def last_backup():
+    files = backup_files()
+    return files[-1][8:-3] if files else None
+
+
+def de_num(v):
+    return "" if v is None else f"{v:g}".replace(".", ",")
+
+
+def local_str(ts):
+    return f"{loc(ts):%Y-%m-%d %H:%M}"
+
+
+@app.get("/api/csv/<kind>")
+def export_csv(kind):
+    names = {p["key"]: p["name"] for p in plants()}
+    if kind == "weigh":
+        header = ["Zeit", "Kürzel", "Pflanze", "Gramm"]
+        rows = [[local_str(r["ts"]), r["plant"], names.get(r["plant"], ""), r["grams"]]
+                for r in db().execute("SELECT ts, plant, grams FROM weigh ORDER BY ts, id")]
+    elif kind == "water":
+        header = ["Zeit", "Kürzel", "Pflanze", "ml", "pH", "AlfaBoost ml/L", "Betta Roots ml/L", "Sonstiges"]
+        rows = [[local_str(r["ts"]), r["plant"], names.get(r["plant"], ""), r["ml"],
+                 de_num(r["ph"]), de_num(r["alfa"]), de_num(r["roots"]), r["extra"] or ""]
+                for r in db().execute("SELECT * FROM water ORDER BY ts, id")]
+    elif kind == "notes":
+        header = ["Zeit", "Kürzel", "Notiz"]
+        rows = [[local_str(r["ts"]), r["plant"] or "", r["text"]]
+                for r in db().execute("SELECT ts, plant, text FROM note ORDER BY ts, id")]
+    else:
+        return jsonify(error="unbekannt"), 404
+    buf = io.StringIO()
+    writer = csv.writer(buf, delimiter=";")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="growlog-{kind}-{datetime.now(TZ):%Y-%m-%d}.csv"'})
+
+
+@app.get("/api/backup")
+def backup_download():
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    backup_to(tmp.name)
+    resp = send_file(tmp.name, as_attachment=True, mimetype="application/octet-stream",
+                     download_name=f"growlog-{datetime.now(TZ):%Y-%m-%d_%H%M}.db")
+    resp.call_on_close(lambda: os.path.exists(tmp.name) and os.unlink(tmp.name))
+    return resp
+
+
+@app.post("/api/restore")
+def restore():
+    upload = request.files.get("file")
+    if not upload:
+        return jsonify(error="Keine Datei gewählt"), 400
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    try:
+        upload.save(tmp.name)
+        src = sqlite3.connect(tmp.name)
+        try:
+            tables = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"plants", "weigh", "water", "note"} <= tables:
+                return jsonify(error="Das ist keine GrowLog-Datenbank"), 400
+            os.makedirs(BACKUP_DIR, exist_ok=True)  # Sicherheitskopie vor dem Überschreiben
+            backup_to(os.path.join(BACKUP_DIR, f"vor-restore-{datetime.now(TZ):%Y-%m-%d_%H%M%S}.db"))
+            dst = sqlite3.connect(DB_PATH)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+    except sqlite3.DatabaseError:
+        return jsonify(error="Datei ist keine gültige Datenbank"), 400
+    finally:
+        os.unlink(tmp.name)
+    init_db()  # Migrationen auf ältere Dateien anwenden
+    return jsonify(ok=True)
 
 
 @app.get("/api/discord")

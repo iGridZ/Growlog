@@ -71,3 +71,19 @@ nav button.active { color: var(--accent); }
 .prow button { padding: 8px 10px; font-size: 1rem; }
 .empty { color: var(--muted); font-size: .9rem; margin: 4px 0 12px; }
 button.link { background: none; border: 0; color: var(--muted); font-size: .8rem; padding: 4px 0 4px 8px; text-decoration: underline; }
+.as { margin-bottom: 14px; }
+.as-head { display: flex; justify-content: space-between; font-size: 1.05rem; }
+.muted { color: var(--muted); font-size: .85rem; }
+.bar { height: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; margin: 6px 0; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+.bar.low i { background: var(--danger); }
+.as small { color: var(--muted); }
+.as-due { font-size: .85rem; margin-top: 2px; }
+button.sug { padding: 2px 0; text-align: left; }
+.prow { flex-wrap: wrap; }
+.prow2 { display: flex; gap: 8px; width: 100%; margin-top: 6px; }
+.prow2 input { flex: 1; min-width: 0; font-size: .85rem; }
+.btns2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btns2 .wide { grid-column: 1 / -1; }
+.btn { display: block; margin: 0; text-decoration: none; text-align: center; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 10px; font-size: .95rem; cursor: pointer; }

@@ -18,6 +18,10 @@
 <main>
   <!-- WIEGEN -->
   <section id="tab-weigh" class="tab active">
+    <div class="card" id="assist-card" hidden>
+      <h2>Gieß-Übersicht</h2>
+      <div id="assist"></div>
+    </div>
     <div class="card">
       <label class="row">Zeit <input type="datetime-local" id="w-ts"></label>
       <div id="w-fields"></div>
@@ -87,6 +91,19 @@
       <h2>Archiviert</h2>
       <p class="hint">Pflanzen mit Einträgen werden nur ausgeblendet, der Verlauf bleibt erhalten.</p>
       <div id="p-arch" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>Daten &amp; Backup</h2>
+      <div class="btns2">
+        <a class="btn" href="/api/csv/weigh" download>CSV Gewichte</a>
+        <a class="btn" href="/api/csv/water" download>CSV Gießen</a>
+        <a class="btn" href="/api/csv/notes" download>CSV Notizen</a>
+        <a class="btn" href="/api/backup" download>Backup (.db)</a>
+        <label class="btn wide">Aus Backup wiederherstellen
+          <input type="file" id="restore" accept=".db,.sqlite,application/octet-stream" hidden>
+        </label>
+      </div>
+      <p class="hint" id="backup-hint"></p>
     </div>
   </section>
 
