@@ -123,6 +123,8 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    if "share" not in table_cols(conn, "users"):
+        conn.execute("ALTER TABLE users ADD COLUMN share INTEGER NOT NULL DEFAULT 0")
     pc = table_cols(conn, "plants")
     if "user_id" not in pc:  # Datenbank aus Version 1/2: auf Mehrbenutzer umstellen
         for col, ddl in (("active", "INTEGER NOT NULL DEFAULT 1"), ("target", "INTEGER"), ("threshold", "INTEGER")):
@@ -419,17 +421,17 @@ def uid():
     return g.user["id"]
 
 
-def plants():
+def plants(u=None):
     rows = db().execute(
         "SELECT key, name, active, target, threshold FROM plants WHERE user_id=? ORDER BY sort, key",
-        (uid(),)).fetchall()
+        (u or uid(),)).fetchall()
     return [{"key": r["key"], "name": r["name"], "active": bool(r["active"]),
              "target": r["target"], "threshold": r["threshold"]} for r in rows]
 
 
-def weigh_sessions():
+def weigh_sessions(u=None):
     """Gruppiert nach Zeitstempel; neueste zuletzt."""
-    rows = db().execute("SELECT id, ts, plant, grams FROM weigh WHERE user_id=? ORDER BY ts, id", (uid(),)).fetchall()
+    rows = db().execute("SELECT id, ts, plant, grams FROM weigh WHERE user_id=? ORDER BY ts, id", (u or uid(),)).fetchall()
     sessions = {}
     for r in rows:
         s = sessions.setdefault(r["ts"], {"ts": r["ts"], "values": {}, "ids": []})
@@ -438,10 +440,10 @@ def weigh_sessions():
     return list(sessions.values())
 
 
-def water_sessions():
+def water_sessions(u=None):
     rows = db().execute(
         "SELECT id, ts, plant, ml, ph, alfa, roots, extra FROM water WHERE user_id=? ORDER BY ts, id",
-        (uid(),)).fetchall()
+        (u or uid(),)).fetchall()
     sessions = {}
     for r in rows:
         s = sessions.setdefault(
@@ -584,7 +586,7 @@ def state():
         water=water_sessions(),
         notes=notes,
         webhook=bool(g.user["webhook"]),
-        me={"username": g.user["username"], "role": g.user["role"]},
+        me={"username": g.user["username"], "role": g.user["role"], "share": bool(g.user["share"])},
         assist=compute_assist(),
         settings=get_settings(),
         last_backup=last_backup() if g.user["role"] == "admin" else None,
@@ -747,7 +749,7 @@ def delete_plant(key):
 # ---------------------------------------------------------------- Konto / Admin
 @app.get("/api/me")
 def get_me():
-    return jsonify(username=g.user["username"], role=g.user["role"], webhook=bool(g.user["webhook"]))
+    return jsonify(username=g.user["username"], role=g.user["role"], webhook=bool(g.user["webhook"]), share=bool(g.user["share"]))
 
 
 @app.put("/api/me")
@@ -759,6 +761,8 @@ def put_me():
         if hook and not WEBHOOK_RE.fullmatch(hook):
             return jsonify(error="Das ist keine gültige Discord-Webhook-Adresse."), 400
         db().execute("UPDATE users SET webhook=? WHERE id=?", (hook or None, uid()))
+    if "share" in data:
+        db().execute("UPDATE users SET share=? WHERE id=?", (1 if data["share"] else 0, uid()))
     if data.get("new_password"):
         if not check_password_hash(g.user["pw_hash"], data.get("current_password") or ""):
             return jsonify(error="Das aktuelle Passwort stimmt nicht."), 400
@@ -770,6 +774,30 @@ def put_me():
         resp = with_session(resp, db().execute("SELECT * FROM users WHERE id=?", (uid(),)).fetchone())
     db().commit()
     return resp
+
+
+@app.get("/api/community")
+def community():
+    rows = db().execute("SELECT id, username FROM users WHERE share=1 AND active=1 AND id<>? ORDER BY username COLLATE NOCASE",
+                        (uid(),)).fetchall()
+    return jsonify(users=[{"id": r["id"], "username": r["username"]} for r in rows])
+
+
+@app.get("/api/profile/<int:user_id>")
+def profile(user_id):
+    r = db().execute("SELECT id, username FROM users WHERE id=? AND share=1 AND active=1 AND id<>?",
+                     (user_id, uid())).fetchone()
+    if not r:
+        return jsonify(error="Dieses Profil ist nicht freigegeben."), 404
+    pl = [p for p in plants(user_id) if p["active"]]
+    keep = {p["key"] for p in pl}
+    weigh = with_deltas([{**s, "values": {k: v for k, v in s["values"].items() if k in keep}, "ids": []}
+                         for s in weigh_sessions(user_id)])
+    water = [{"ts": w["ts"], "ml": {k: v for k, v in w["ml"].items() if k in keep}, "ph": w["ph"],
+              "alfa": w["alfa"], "roots": w["roots"], "extra": w["extra"], "ids": []}
+             for w in water_sessions(user_id)]
+    return jsonify(username=r["username"], plants=[{"key": p["key"], "name": p["name"]} for p in pl],
+                   weigh=weigh, water=water)
 
 
 def user_json(r):

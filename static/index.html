@@ -122,6 +122,21 @@
       </form>
     </div>
     <div class="card">
+      <h2>Profil teilen</h2>
+      <label class="row"><span>Mein Profil für andere angemeldete Nutzer sichtbar (nur lesen)</span><input type="checkbox" id="acc-share"></label>
+      <p class="hint">Sichtbar sind Pflanzen, Gewichtsverlauf und Gießen. Notizen, Discord und Einstellungen bleiben privat.</p>
+    </div>
+    <div class="card" id="comm-card" hidden>
+      <h2>Andere Profile</h2>
+      <div id="comm-list" class="list"></div>
+      <div id="prof-view" hidden>
+        <h2 class="sub-h" id="prof-title"></h2>
+        <div id="pchart"></div><div id="plegend" class="legend"></div>
+        <h2 class="sub-h">Gießen</h2><div id="pwater" class="list"></div>
+        <h2 class="sub-h">Wiegen</h2><div id="pweigh" class="list"></div>
+      </div>
+    </div>
+    <div class="card">
       <h2>Discord</h2>
       <label>Webhook-Adresse
         <input type="url" id="acc-hook" placeholder="https://discord.com/api/webhooks/…" autocomplete="off">

@@ -171,9 +171,9 @@ $("#g-save").onclick = async () => {
 };
 
 // ---------- Verlauf
-function renderChart() {
-  const pts = S.weigh.slice(-24);
-  if (pts.length < 2) return ($("#chart").innerHTML = '<p class="hint">Mindestens zwei Einträge nötig.</p>');
+function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#legend") {
+  const pts = weigh.slice(-24);
+  if (pts.length < 2) return ($(el).innerHTML = '<p class="hint">Mindestens zwei Einträge nötig.</p>');
   const W = 600, H = 240, L = 52, R = 10, T = 10, B = 24;
   const all = pts.flatMap((s) => Object.values(s.values));
   let min = Math.min(...all), max = Math.max(...all);
@@ -189,16 +189,16 @@ function renderChart() {
     svg += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="${css("--line")}"/>` +
       `<text x="${L - 6}" y="${yy + 4}" text-anchor="end" font-size="15" fill="${css("--muted")}">${Math.round(v)}</text>`;
   }
-  S.plants.forEach((p, i) => {
+  plants.forEach((p, i) => {
     const line = pts.filter((s) => p.key in s.values).map((s) => `${x(s.ts)},${y(s.values[p.key])}`);
     if (line.length) svg += `<polyline fill="none" stroke="${css(COLORS[i % 5])}" stroke-width="2.5" points="${line.join(" ")}"/>`;
   });
   [pts[0], pts.at(-1)].forEach((s, i) => {
     svg += `<text x="${i ? W - R : L}" y="${H - 6}" text-anchor="${i ? "end" : "start"}" font-size="15" fill="${css("--muted")}">${fmtTs(s.ts)}</text>`;
   });
-  $("#chart").innerHTML = svg + "</svg>";
-  $("#legend").innerHTML = S.plants
-    .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${p.key}</span>`).join("");
+  $(el).innerHTML = svg + "</svg>";
+  $(lg).innerHTML = plants
+    .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</span>`).join("");
 }
 function renderLog() {
   renderChart();
@@ -288,6 +288,33 @@ $("#p-add").onclick = async () => {
 $("#p-name").addEventListener("keydown", (e) => e.key === "Enter" && $("#p-add").click());
 
 // ---------- Konto
+$("#acc-share").onchange = async (e) => {
+  try { await api("/api/me", "PUT", { share: e.target.checked }); S.me.share = e.target.checked; toast(e.target.checked ? "Profil sichtbar" : "Profil privat"); }
+  catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
+};
+async function loadCommunity() {
+  let d; try { d = await api("/api/community"); } catch { return; }
+  $("#comm-card").hidden = !d.users.length;
+  $("#prof-view").hidden = true;
+  $("#comm-list").innerHTML = d.users.map((u) => `<div class="item"><div>🌱 <b>${esc(u.username)}</b></div><button data-prof="${u.id}">Ansehen</button></div>`).join("");
+  document.querySelectorAll("[data-prof]").forEach((b) => (b.onclick = async () => {
+    try {
+      const p = await api("/api/profile/" + b.dataset.prof);
+      $("#prof-title").textContent = p.username;
+      renderChart(p.weigh, p.plants, "#pchart", "#plegend");
+      $("#pwater").innerHTML = [...p.water].reverse().slice(0, 10).map((w) => {
+        const ml = p.plants.filter((x) => x.key in w.ml).map((x) => `${x.key} ${w.ml[x.key]} ml`).join(" · ");
+        const mix = [w.ph != null && `pH ${w.ph}`, w.alfa && `Alfa ${w.alfa}`, w.roots && `Roots ${w.roots}`, w.extra].filter(Boolean).join(" · ");
+        return `<div class="item"><div><div class="when">${fmtTs(w.ts)}</div><div class="vals">${esc(ml)}</div>${mix ? `<div class="when">${esc(mix)}</div>` : ""}</div></div>`;
+      }).join("") || '<p class="hint">Noch nichts.</p>';
+      $("#pweigh").innerHTML = [...p.weigh].reverse().slice(0, 10).map((s) =>
+        `<div class="item"><div><div class="when">${fmtTs(s.ts)}</div><div class="vals">${p.plants.filter((x) => x.key in s.values).map((x) => `${esc(x.key)} ${s.values[x.key]}`).join(" · ")}</div></div></div>`
+      ).join("") || '<p class="hint">Noch nichts.</p>';
+      $("#prof-view").hidden = false;
+      $("#prof-view").scrollIntoView({ behavior: "smooth" });
+    } catch (err) { toast(err.message, true); }
+  }));
+}
 function copyText(text) {
   return navigator.clipboard.writeText(text).then(() => toast("Kopiert")).catch(() => toast("Bitte von Hand kopieren", true));
 }
@@ -298,6 +325,8 @@ function renderAccount() {
   $("#pw-user").value = me.username;
   $("#acc-hook").placeholder = S.webhook ? "Webhook gespeichert – zum Ändern neue Adresse einfügen" : "https://discord.com/api/webhooks/…";
   $("#hook-remove").hidden = !S.webhook;
+  $("#acc-share").checked = !!me.share;
+  loadCommunity();
   if (me.role === "admin") { loadUsers(); loadConfig(); }
 }
 async function loadConfig() {

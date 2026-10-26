@@ -39,6 +39,9 @@ Tab "Konto" (Kopfzeile oben rechts):
 
 - **Jeder Nutzer:** Passwort ändern, eigenen Discord-Webhook hinterlegen, abmelden. Pflanzen, Gewichte, Gießen,
   Notizen und Zeiten sind pro Nutzer getrennt.
+- **Profil teilen:** Standard ist privat. Mit dem Schalter "Profil teilen" sehen andere angemeldete Nutzer
+  (nur lesen) deine Pflanzen, den Gewichtsverlauf und das Gießen. Notizen, Discord und Einstellungen bleiben privat.
+  Freigegebene Profile erscheinen bei den anderen unter "Andere Profile".
 - **Admin:** Benutzer anlegen, sperren, Rolle ändern, Passwort zurücksetzen, löschen; Einladungslinks erzeugen
   (7 Tage gültig, einmal nutzbar, Freunde registrieren sich damit selbst); Server-Einstellungen (Zeitzone,
   Betrieb hinter Reverse-Proxy); Datenbank-Backup und Wiederherstellung (ersetzt alle Konten).
