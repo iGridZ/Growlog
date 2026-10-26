@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14201a">
+<link rel="icon" href="/static/icons/icon-192.png">
+<title>GrowLog – Anmelden</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  .login { max-width: 380px; margin: 12vh auto 0; }
+  .err { color: var(--danger); font-size: .9rem; margin: 0 0 10px; }
+  h1 { text-align: center; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<main class="login">
+  <h1>🌱 GrowLog</h1>
+  <form class="card" method="post" action="/login" autocomplete="on">
+    <label>Benutzername
+      <input type="text" name="username" id="username" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required autofocus>
+    </label>
+    <label>Passwort
+      <input type="password" name="password" id="password" autocomplete="current-password" required>
+    </label>
+    <!--ERR-->
+    <button class="primary" type="submit">Anmelden</button>
+  </form>
+</main>
+</body>
+</html>

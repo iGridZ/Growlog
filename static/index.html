@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14201a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icons/icon-192.png">
+<title>GrowLog</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>🌱 GrowLog</h1>
+  <span><span id="status"></span> <button id="logout" class="link" hidden>Abmelden</button></span>
+</header>
+
+<main>
+  <!-- WIEGEN -->
+  <section id="tab-weigh" class="tab active">
+    <div class="card">
+      <label class="row">Zeit <input type="datetime-local" id="w-ts"></label>
+      <div id="w-fields"></div>
+      <button class="primary" id="w-save">Gewichte speichern</button>
+      <p class="hint">Gewicht mit Untersetzer in g. Die Differenz zum letzten Wiegen siehst du live.</p>
+    </div>
+  </section>
+
+  <!-- GIESSEN -->
+  <section id="tab-water" class="tab">
+    <div class="card">
+      <label class="row">Zeit <input type="datetime-local" id="g-ts"></label>
+      <div id="g-fields"></div>
+      <div class="grid3">
+        <label>pH<input type="number" step="0.1" inputmode="decimal" id="g-ph" placeholder="6.4"></label>
+        <label>AlfaBoost ml/L<input type="number" step="0.1" inputmode="decimal" id="g-alfa" placeholder="2"></label>
+        <label>Betta Roots ml/L<input type="number" step="0.1" inputmode="decimal" id="g-roots" placeholder="5"></label>
+      </div>
+      <label>Sonstiges<input type="text" id="g-extra" placeholder="z. B. 50/50 RO, Bio Enhancer 0,5 g/L"></label>
+      <div class="calc" id="g-calc"></div>
+      <button class="primary" id="g-save">Gießen speichern</button>
+    </div>
+  </section>
+
+  <!-- VERLAUF -->
+  <section id="tab-log" class="tab">
+    <div class="card">
+      <h2>Gewichtsverlauf</h2>
+      <div id="chart"></div>
+      <div id="legend" class="legend"></div>
+    </div>
+    <div class="card">
+      <h2>Wiegen</h2>
+      <div id="weigh-list" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>Gießen</h2>
+      <div id="water-list" class="list"></div>
+    </div>
+    <div class="card">
+      <h2>Notizen</h2>
+      <div class="row2">
+        <select id="n-plant"></select>
+        <input type="text" id="n-text" placeholder="Notiz …">
+        <button id="n-save">+</button>
+      </div>
+      <div id="note-list" class="list"></div>
+    </div>
+  </section>
+
+  <!-- PFLANZEN -->
+  <section id="tab-plants" class="tab">
+    <div class="card">
+      <h2>Neue Pflanze</h2>
+      <div class="row3">
+        <input type="text" id="p-name" placeholder="Name, z. B. Blueberry Muffin" maxlength="60">
+        <input type="text" id="p-key" placeholder="Kürzel" maxlength="6" autocapitalize="characters">
+        <button id="p-add">+</button>
+      </div>
+      <p class="hint">Das Kürzel ist optional und wird sonst aus dem Namen gebildet (z. B. BM). Es erscheint in Tabellen und im Discord-Block.</p>
+    </div>
+    <div class="card">
+      <h2>Pflanzen</h2>
+      <div id="p-list" class="list"></div>
+    </div>
+    <div class="card" id="p-arch-card" hidden>
+      <h2>Archiviert</h2>
+      <p class="hint">Pflanzen mit Einträgen werden nur ausgeblendet, der Verlauf bleibt erhalten.</p>
+      <div id="p-arch" class="list"></div>
+    </div>
+  </section>
+
+  <!-- DISCORD -->
+  <section id="tab-discord" class="tab">
+    <div class="card">
+      <label class="check"><input type="checkbox" id="d-water" checked> Gießen mit anzeigen</label>
+      <pre id="d-text">…</pre>
+      <div class="btns">
+        <button class="primary" id="d-copy">Kopieren</button>
+        <button id="d-post">An Discord senden</button>
+      </div>
+      <p class="hint" id="d-hint"></p>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button data-tab="weigh" class="active">⚖️<span>Wiegen</span></button>
+  <button data-tab="water">💧<span>Gießen</span></button>
+  <button data-tab="log">📈<span>Verlauf</span></button>
+  <button data-tab="discord">💬<span>Discord</span></button>
+  <button data-tab="plants">🪴<span>Pflanzen</span></button>
+</nav>
+
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
