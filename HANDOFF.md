@@ -41,5 +41,21 @@ Es gibt keine Testsuite im Repo (die bisherigen Playwright-/Python-Skripte lagen
 6. **Sicherheit prüfen:** CSRF (SameSite=Lax + JSON-API), Rate-Limits der Einladungs-/Setup-Routen, Passwort-Regeln.
 7. Alfa-/Roots-Mengen der Gießeinträge vom 25.10. fehlen (im Verlauf-Tab nachtragen, kein Code nötig).
 
+## Schwellenwert im Gieß-Assistenten – Eriks Kritik (zu klären/umbauen)
+Erik ist mit der Herkunft des Schwellengewichts **nicht einverstanden**. Aktuelles Verhalten (`compute_assist` in `app.py`, Variablen `auto_target`/`auto_thr`):
+- **Ziel (auto):** Gewicht der ersten Messung nach dem letzten Gießen (Messung, nach der ein Gießeintrag liegt, `post[i]`).
+- **Schwelle (auto):** Gewicht der Messung unmittelbar *davor* (`entries[i-1]`), aber nur wenn diese ≤ 36 h vor der Nach-Gieß-Messung liegt. Also: das Gewicht, bei dem Erik zuletzt tatsächlich gegossen hat.
+- Manuell überschreibbar pro Pflanze im Tab „Pflanzen“ (`plants.target`/`plants.threshold`, manuell gewinnt: `p["threshold"] or d["auto_thr"]`).
+- Verwendet wird die Schwelle für: Füllstand in % (`(cur-thr)/(target-thr)`), `due_at`/`hours_left` (erster Prognosepunkt ≤ Schwelle) und die Wahl des Gießtermins (`chosen`: letzter Termin, bevor die Schwelle vor dem nächsten Termin erreicht würde).
+
+**Problem:** Die Schwelle ist nur ein Zufallsstichprobe seiner Gewohnheit – er kann zu früh oder zu spät gegossen haben, und je nach Uhrzeit der Vor-Messung (z. B. 17:13 vor dem Gießen) streut der Wert. Sie sagt nichts darüber, ob die Pflanze wirklich Wasser brauchte. Mit nur 1–2 Gießzyklen ist sie besonders unzuverlässig, und eine zu hohe Schwelle lässt den Assistenten dauernd „gießen“ vorschlagen bzw. eine zu niedrige nie.
+
+**Lösungsideen für die Planung (mit Erik abstimmen):**
+1. Beim Gießeintrag ein Feld „war der Topf trocken genug?“ (zu nass / passend / zu trocken); die Schwelle wird nur aus „passend“-Gießvorgängen gelernt und über mehrere Zyklen gemittelt (Median), nicht aus dem letzten.
+2. Schwelle als Anteil des Ziel-Gewichts über dem Trockengewicht (Topf + Erde + Untersetzer ungegossen wiegen = Leergewicht), z. B. Schwelle = Leergewicht + 50–60 % der Wasserkapazität (Ziel − Leergewicht); Anteil im UI einstellbar. Das ist unabhängig von Eriks Zufallszeitpunkt.
+3. Schwelle pro Pflanze im UI als Prozent-Regler („gießen bei X % Füllstand“) statt Gramm; Gramm werden daraus berechnet.
+4. Erst ab N ≥ 3 Gießzyklen eine automatische Schwelle anzeigen, davor „zu wenig Daten“ und nur manuelle Werte nutzen.
+Erik muss entscheiden, welcher Ansatz gewünscht ist; bis dahin sind manuelle Werte der verlässlichste Weg.
+
 ## Pflanzen-Kontext (nur zum Verständnis der Daten)
 Drei gekaufte Stecklinge im 80x80-VIVOSUN-Zelt: Blueberry Muffin (BM), Rainbow Soap (RS), London Marker (LM). Gewichte immer inkl. Untersetzer, morgens ca. 6:30–7:00 und abends gegen 17:30 (Gießzeit). Beratung zu Gießen/Klima/Training bleibt im Chat, nicht in diesem Projekt.
