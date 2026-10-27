@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8
+tzdata  # nur Windows: dort fehlt die System-Zeitzonendatenbank
