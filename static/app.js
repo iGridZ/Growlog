@@ -54,17 +54,13 @@ function renderAssist() {
   $("#assist-card").hidden = !rows.length;
   $("#assist").innerHTML = rows.map((p) => {
     const a = S.assist[p.key];
-    const bits = [];
-    if (a.target) bits.push(`Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}`);
-    if (a.threshold) bits.push(`Schwelle ${a.threshold} g${a.threshold_manual ? "" : " (auto)"}`);
+    const toTarget = a.target ? a.current - a.target : null;
     return `<div class="as"><div class="as-head"><span><b>${esc(p.key)}</b> ${a.current} g</span>` +
-      `<span class="muted">${a.pct != null ? a.pct + " %" : ""}</span></div>` +
-      (a.pct != null ? `<div class="bar ${a.pct < 25 ? "low" : ""}"><i style="width:${a.pct}%"></i></div>` : "") +
-      `<small>${bits.join(" · ")}</small>` +
+      `<span class="muted">${toTarget != null ? sign(toTarget) + " g zum Ziel" : ""}</span></div>` +
+      (a.target ? `<small>Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}</small>` : "") +
       (a.rate_lit != null ? `<small>Verbrauch: Licht ~${dnum(a.rate_lit)} g/h · Dunkel ~${dnum(a.rate_dark)} g/h · ≈ ${a.use24} g/Tag</small>` : "") +
-      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") +
-      (a.due_at ? `<small>Schwelle erreicht laut Modell: ${fmtTs(a.due_at)}</small>` : "") + `</div>`;
-  }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Der Fingertest entscheidet. Ziel und Schwelle kannst du im Tab „Pflanzen“ selbst setzen.</p>';
+      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") + `</div>`;
+  }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Ob gegossen wird, entscheidest du nach Gefühl. Das Ziel kannst du im Tab „Pflanzen“ selbst setzen.</p>';
 }
 
 // ---------- Tabs
@@ -243,9 +239,7 @@ function renderPlants() {
     `<button data-psave="${esc(p.key)}" title="Speichern">💾</button>` +
     `<button data-prm="${esc(p.key)}" title="Entfernen">🗑</button>` +
     `<div class="prow2"><input class="pt" type="number" inputmode="numeric" data-k="${esc(p.key)}" value="${p.target || ""}" ` +
-    `placeholder="Ziel${autoVal(p.key, "auto_target") ? " (auto " + autoVal(p.key, "auto_target") + ")" : ""}">` +
-    `<input class="pth" type="number" inputmode="numeric" data-k="${esc(p.key)}" value="${p.threshold || ""}" ` +
-    `placeholder="Schwelle${autoVal(p.key, "auto_threshold") ? " (auto " + autoVal(p.key, "auto_threshold") + ")" : ""}"></div></div>`
+    `placeholder="Ziel${autoVal(p.key, "auto_target") ? " (auto " + autoVal(p.key, "auto_target") + ")" : ""}"></div></div>`
   ).join("") || '<p class="empty">Noch keine Pflanzen. Lege oben die erste an.</p>';
   $("#p-arch-card").hidden = !arch.length;
   $("#p-arch").innerHTML = arch.map((p) =>
@@ -258,7 +252,6 @@ function renderPlants() {
     try { await api("/api/plants/" + encodeURIComponent(k), "PUT", {
       name, key,
       target: document.querySelector(`.pt[data-k="${k}"]`).value,
-      threshold: document.querySelector(`.pth[data-k="${k}"]`).value,
     }); toast("Gespeichert"); await load(); }
     catch (e) { toast(e.message, true); }
   }));

@@ -62,7 +62,8 @@ def test_manual_target_wins_over_auto(login):
     c, _ = login("anna")
     c.post("/api/plants", json={"name": "Alpha", "key": "AA"})
     c.post("/api/weigh", json={"ts": "2026-10-20T07:00:00Z", "values": {"AA": 3000}})
-    c.put("/api/plants/AA", json={"target": 3300, "threshold": 3100})
+    c.put("/api/plants/AA", json={"target": 3300})
     a = c.get("/api/state").get_json()["assist"]["AA"]
-    assert a["target"] == 3300 and a["target_manual"] and a["threshold"] == 3100
+    assert a["target"] == 3300 and a["target_manual"]
     assert a["suggest_ml"] > 0
+    assert not {"threshold", "auto_threshold", "pct", "due_at", "hours_left"} & set(a)

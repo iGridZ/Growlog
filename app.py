@@ -1042,8 +1042,8 @@ def weight_at(pts, start, when):
 
 
 def compute_assist(now=None):
-    """Richtwerte pro Pflanze: Ziel-/Schwellengewicht (auto oder manuell), Verbrauch getrennt
-    nach Licht/Dunkel, Prognose, empfohlener Gießtermin und ml-Vorschlag."""
+    """Richtwerte pro Pflanze: Zielgewicht (auto oder manuell), Verbrauch getrennt
+    nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
     now = now or now_utc()
     st = get_settings()
     sessions, waters = weigh_sessions(), water_sessions()
@@ -1061,12 +1061,10 @@ def compute_assist(now=None):
             post.append(any(prev < w["ts"] <= ts for w in wlist))  # erste Messung nach dem Gießen
             prev = ts
 
-        auto_target = auto_thr = None
+        auto_target = None
         for i in range(len(entries) - 1, -1, -1):
             if post[i]:
                 auto_target = entries[i][1]
-                if i > 0 and (parse_ts(entries[i][0]) - parse_ts(entries[i - 1][0])).total_seconds() <= 36 * 3600:
-                    auto_thr = entries[i - 1][1]
                 break
 
         ratios = []  # gemessene g Zuwachs pro ml
@@ -1090,8 +1088,7 @@ def compute_assist(now=None):
                 rows.append((t1, loss, lit, hrs - lit))
         if rows:
             intervals[k] = rows
-        info[k] = {"plant": p, "entries": entries, "ratio": ratio,
-                   "auto_target": auto_target, "auto_thr": auto_thr}
+        info[k] = {"plant": p, "entries": entries, "ratio": ratio, "auto_target": auto_target}
 
     rates, r, growth = fit_model(intervals, now) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
 
@@ -1101,42 +1098,24 @@ def compute_assist(now=None):
         cur_ts, cur = entries[-1]
         start = parse_ts(cur_ts)
         target = p["target"] or d["auto_target"]
-        threshold = p["threshold"] or d["auto_thr"]
         a = rates.get(k)
         res = {
             "current": cur, "current_ts": cur_ts,
             "target": target, "target_manual": bool(p["target"]), "auto_target": d["auto_target"],
-            "threshold": threshold, "threshold_manual": bool(p["threshold"]), "auto_threshold": d["auto_thr"],
             "ratio": round(ratio, 2), "use24": None, "rate_lit": None, "rate_dark": None,
-            "hours_left": None, "due_at": None, "pct": None,
             "slot_at": None, "slot_expected": None, "slot_today": None, "suggest_ml": 0,
         }
-        if target and threshold and target > threshold:
-            res["pct"] = max(0, min(100, round((cur - threshold) / (target - threshold) * 100)))
         if a:
             pts = project(cur, start, a, r, growth, st)
             lit24 = lit_hours(now, now + timedelta(hours=24), st["light_on"], st["light_off"])
             res["rate_lit"], res["rate_dark"] = round(a, 1), round(a * r, 1)
             res["use24"] = round(a * (lit24 + r * (24 - lit24)))
-            if threshold:
-                hit = next((t for t, w in pts if w <= threshold), None)
-                if hit:
-                    res["due_at"] = iso(hit)
-                    res["hours_left"] = round(max(0.0, (hit - now).total_seconds() / 3600), 1)
-            # Gießtermin: letzter Termin, bevor die Schwelle vor dem nächsten Termin erreicht würde
+            # Gießtermin: nächste Gießzeit aus den Einstellungen (ob gegossen wird, entscheidet Erik nach Gefühl)
             wh, wm = _hm(st["water_time"])
             nl = now.astimezone(TZ)
-            slot = datetime(nl.year, nl.month, nl.day, wh, wm, tzinfo=TZ).astimezone(timezone.utc)
-            if slot < now:
-                slot += timedelta(days=1)
-            chosen = None
-            for j in range(5):
-                s_j = datetime.fromtimestamp(slot.timestamp() + j * 86400, timezone.utc)
-                if threshold and weight_at(pts, start, s_j + timedelta(hours=24)) <= threshold:
-                    chosen = s_j
-                    break
-            if chosen is None:
-                chosen = slot
+            chosen = datetime(nl.year, nl.month, nl.day, wh, wm, tzinfo=TZ).astimezone(timezone.utc)
+            if chosen < now:
+                chosen += timedelta(days=1)
             expected = weight_at(pts, start, chosen)
             res["slot_at"], res["slot_expected"] = iso(chosen), round(expected)
             res["slot_today"] = chosen.astimezone(TZ).date() == nl.date()
