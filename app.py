@@ -1048,15 +1048,20 @@ def fit_model(intervals, now, half_life=HALF_LIFE_DAYS):
     return {key: fit_a(rows, r) for key, rows in intervals.items()}, r, k
 
 
-def project(cur, start, a, r, k, st, days=7):
-    """Erwartetes Gewicht in 15-Minuten-Schritten ab der Messung (Licht/Dunkel, Wachstum)."""
+def project(cur, start, a, r, k, st, days=7, profile=None):
+    """Erwartetes Gewicht in 15-Minuten-Schritten ab der Messung (Licht/Dunkel, Wachstum).
+    Mit `profile` (g/h je Zeitschritt, None = keine Angabe) gilt stattdessen das Tageszeit-Profil."""
     pts, t, w = [], start, float(cur)
     step = timedelta(minutes=15)
     for _ in range(days * 96):
         t2 = t + step
-        lit = lit_hours(t, t2, st["light_on"], st["light_off"])
-        growth = math.exp(k * (t - start).total_seconds() / 86400)
-        w -= a * growth * (lit + r * (0.25 - lit))
+        rate = profile(t, t2) if profile else None
+        if rate is None:
+            lit = lit_hours(t, t2, st["light_on"], st["light_off"])
+            growth = math.exp(k * (t - start).total_seconds() / 86400)
+            w -= a * growth * (lit + r * (0.25 - lit))
+        else:
+            w -= rate * 0.25
         t = t2
         pts.append((t, w))
     return pts
@@ -1065,6 +1070,87 @@ def project(cur, start, a, r, k, st, days=7):
 def weight_at(pts, start, when):
     idx = int((when - start).total_seconds() // 900) - 1
     return pts[max(0, min(len(pts) - 1, idx))][1]
+
+
+# Verfahren zur Verbrauchs-Schätzung. Jedes liefert je Pflanze a (g pro Lichtstunde), r (Dunkel/Licht),
+# Wachstum und optional ein Tageszeit-Profil. Der Prognose-Check wählt das genaueste.
+ALGOS = ("ema", "avg", "last", "median", "state", "slot")
+ALGO_LABELS = {
+    "ema": "EMA (neuere Messungen zählen stärker)",
+    "avg": "Durchschnitt",
+    "last": "Letztes Delta",
+    "median": "Median der letzten 5 Intervalle",
+    "state": "Zustands-Delta (Licht/Dunkel-Regeln)",
+    "slot": "Gleiche Tageszeit wie gestern",
+}
+DEFAULT_ALGO = "ema"
+
+
+def _norm_rate(row, r):
+    """Verbrauch pro Lichtstunde-Äquivalent eines Intervalls (Licht + r · Dunkel)."""
+    _t1, loss, li, da = row
+    den = li + r * da
+    return loss / den if den > 0 else None
+
+
+def state_rates(rows, base_r):
+    """Zustands-Delta: das letzte Intervall und das jüngste mit deutlich anderem Lichtanteil (Zustand) liefern je ein
+    Delta; daraus werden Licht- und Dunkelverbrauch exakt bestimmt. Fehlt ein zweiter Zustand: letztes Delta."""
+    share = lambda x: x[2] / (x[2] + x[3])
+    a_row = rows[-1]
+    b_row = next((x for x in reversed(rows[:-1]) if abs(share(x) - share(a_row)) >= 0.3), None)
+    if b_row:
+        (_, la, lia, daa), (_, lb, lib, dab) = a_row, b_row
+        det = lia * dab - daa * lib
+        if abs(det) > 1e-6:
+            a, b = (la * dab - daa * lb) / det, (lia * lb - la * lib) / det
+            if a > 0 and b > 0:
+                return a, max(0.05, min(0.6, b / a))
+    a = _norm_rate(a_row, base_r)
+    return (a, base_r) if a else None
+
+
+def make_profile(rows):
+    """Tageszeit-Profil: für einen Zeitpunkt gilt der Verbrauch (g/h) des jüngsten Intervalls, das dieselbe
+    Uhrzeit an einem früheren Tag abdeckte. Nur die letzten 4 Tage zählen."""
+    newest = rows[-1][0]
+    recent = []
+    for t1, loss, li, da in rows:
+        if li + da > 0 and newest - t1 <= timedelta(days=4):
+            recent.append((t1 - timedelta(hours=li + da), t1, loss / (li + da)))
+
+    def profile(t, t2):
+        mid = t + (t2 - t) / 2
+        for s0, s1, rate in reversed(recent):
+            d = math.floor((mid - s0).total_seconds() / 86400)
+            if d >= 1 and mid - timedelta(days=d) < s1:
+                return rate
+        return None
+    return profile
+
+
+def estimate(algo, intervals, now):
+    """-> {pflanze: {"a", "r", "growth", "profile"}} nach dem gewählten Verfahren."""
+    rates, r, k = fit_model(intervals, now, HALF_LIFE_DAYS if algo in ("ema", "slot") else None)
+    out = {}
+    for key, rows in intervals.items():
+        if not rates.get(key):
+            continue
+        fit = {"a": rates[key], "r": r, "growth": k, "profile": None}
+        if algo == "last":
+            fit.update(a=_norm_rate(rows[-1], r) or fit["a"], growth=0.0)  # das letzte Delta enthält das Wachstum schon
+        elif algo == "median":
+            vals = [v for v in (_norm_rate(x, r) for x in rows[-5:]) if v]
+            if vals:
+                fit["a"] = statistics.median(vals)
+        elif algo == "state":
+            s = state_rates(rows, r)
+            if s:
+                fit.update(a=s[0], r=s[1], growth=0.0)
+        elif algo == "slot":
+            fit.update(profile=make_profile(rows), growth=0.0)
+        out[key] = fit
+    return out
 
 
 def plant_series(k, sessions, waters):
@@ -1078,8 +1164,8 @@ def plant_series(k, sessions, waters):
     return entries, wlist, post
 
 
-def model_state(u, now, until=None, half_life=HALF_LIFE_DAYS):
-    """Passt das Verbrauchsmodell an die Daten an (mit `until` nur an Daten bis dahin, für den Prognose-Check)."""
+def model_state(u, now, until=None, algo=DEFAULT_ALGO):
+    """Schätzt den Verbrauch mit dem gewählten Verfahren (mit `until` nur aus Daten bis dahin, für den Prognose-Check)."""
     st = get_settings(u)
     sessions, waters = weigh_sessions(u), water_sessions(u)
     if until:
@@ -1123,10 +1209,12 @@ def model_state(u, now, until=None, half_life=HALF_LIFE_DAYS):
             intervals[k] = rows
         info[k] = {"plant": p, "entries": entries, "post": post, "ratio": ratio, "auto_target": auto_target}
 
-    rates, r, growth = fit_model(intervals, now, half_life) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
+    fits = estimate(algo, intervals, now) if intervals else {}
     for k, d in info.items():
-        d["unlogged"] = unlogged_waterings(d["entries"], d["post"], d["ratio"], rates.get(k), r, st)
-    return st, info, rates, r, growth
+        fit = fits.get(k)
+        d["unlogged"] = unlogged_waterings(d["entries"], d["post"], d["ratio"], fit and fit["a"],
+                                           fit["r"] if fit else DEFAULT_DARK_RATIO, st)
+    return st, info, fits
 
 
 UNLOGGED_MIN_GAIN = 40  # g Zunahme ohne Gießeintrag, ab der ein vergessenes Gießen vermutet wird
@@ -1157,14 +1245,15 @@ def compute_assist(now=None, u=None):
     nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
     now = now or now_utc()
     u = u or uid()
-    st, info, rates, r, growth = model_state(u, now, half_life=pick_method(u, now)["half_life"])
+    st, info, fits = model_state(u, now, algo=pick_method(u, now)["algo"])
     out = {}
     for k, d in info.items():
         p, entries, ratio = d["plant"], d["entries"], d["ratio"]
         cur_ts, cur = entries[-1]
         start = parse_ts(cur_ts)
         target = p["target"] or d["auto_target"]
-        a = rates.get(k)
+        fit = fits.get(k)
+        a = fit and fit["a"]
         res = {
             "current": cur, "current_ts": cur_ts,
             "target": target, "target_manual": bool(p["target"]), "auto_target": d["auto_target"],
@@ -1173,7 +1262,8 @@ def compute_assist(now=None, u=None):
             "unlogged": [e for e in d["unlogged"] if now - parse_ts(e["ts"]) <= timedelta(days=3)],
         }
         if a:
-            pts = project(cur, start, a, r, growth, st)
+            r = fit["r"]
+            pts = project(cur, start, a, r, fit["growth"], st, profile=fit["profile"])
             lit24 = lit_hours(now, now + timedelta(hours=24), st["light_on"], st["light_off"])
             res["rate_lit"], res["rate_dark"] = round(a, 1), round(a * r, 1)
             res["use24"] = round(a * (lit24 + r * (24 - lit24)))
@@ -1227,58 +1317,75 @@ def week_summary(u, now):
     return {"days": rows, "ml_total": sum(r["ml"] for r in rows), "loss_total": sum(r["loss"] for r in rows)}
 
 
-def backtest(u, now, n=6, half_life=HALF_LIFE_DAYS):
-    """Prognose-Check: für die letzten Messungen ohne Gießen die Vorhersage nachrechnen, die das Modell mit dem
-    Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen."""
+METHOD_MIN_ROWS = 4     # so viele nachgerechnete Prognosen braucht der Vergleich mindestens
+METHOD_TIE = 0.02       # weniger als 2 % Unterschied zählt als gleich: dann bleibt das Standardverfahren
+_method_cache = {}
+
+
+def backtest_algos(u, now, n, algos):
+    """Prognose-Check: für die letzten Messungen ohne Gießen die Vorhersage nachrechnen, die jedes Verfahren mit dem
+    Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen.
+    -> {verfahren: {pflanze: [Zeilen]}}. Das Anpassen wird je Zeitpunkt und Verfahren nur einmal gerechnet."""
     sessions, waters = weigh_sessions(u), water_sessions(u)
-    out = {}
+    fits = {}
+    out = {algo: {} for algo in algos}
     for p in plants(u):
         if not p["active"]:
             continue
         k = p["key"]
         entries, _w, post = plant_series(k, sessions, waters)
-        rows = []
         for i in range(max(1, len(entries) - n), len(entries)):
             t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
             if post[i] or not 3 <= (t1 - t0).total_seconds() / 3600 <= 36:
                 continue
             if entries[i][1] - entries[i - 1][1] >= UNLOGGED_MIN_GAIN:  # vergessenes Gießen, keine Prognose-Frage
                 continue
-            st, _info, rates, r, growth = model_state(u, t0, until=entries[i - 1][0], half_life=half_life)
-            if not rates.get(k):
-                continue
-            pts = project(entries[i - 1][1], t0, rates[k], r, growth, st, days=2)
-            predicted = round(weight_at(pts, t0, t1))
-            rows.append({"ts": entries[i][0], "predicted": predicted, "actual": entries[i][1],
-                         "err": entries[i][1] - predicted})
-        if rows:
-            out[k] = {"rows": rows, "mae": round(sum(abs(x["err"]) for x in rows) / len(rows))}
+            for algo in algos:
+                if (entries[i - 1][0], algo) not in fits:
+                    fits[(entries[i - 1][0], algo)] = model_state(u, t0, until=entries[i - 1][0], algo=algo)
+                st, _info, fs = fits[(entries[i - 1][0], algo)]
+                fit = fs.get(k)
+                if not fit:
+                    continue
+                pts = project(entries[i - 1][1], t0, fit["a"], fit["r"], fit["growth"], st, days=2,
+                              profile=fit["profile"])
+                predicted = round(weight_at(pts, t0, t1))
+                out[algo].setdefault(k, []).append({"ts": entries[i][0], "predicted": predicted,
+                                                    "actual": entries[i][1], "err": entries[i][1] - predicted})
     return out
 
 
-EMA_MIN_ROWS = 4        # so viele nachgerechnete Prognosen braucht der Vergleich mindestens
-EMA_MIN_GAIN = 0.10     # EMA muss den Fehler um mindestens 10 % senken, sonst bleibt es beim Durchschnitt
-_method_cache = {}
+def backtest(u, now, n=6, algo=DEFAULT_ALGO):
+    per_plant = backtest_algos(u, now, n, [algo])[algo]
+    return {k: {"rows": rows, "mae": round(sum(abs(x["err"]) for x in rows) / len(rows))}
+            for k, rows in per_plant.items()}
 
 
 def pick_method(u, now):
-    """Wählt das Gewichtungsverfahren per Prognose-Check: EMA-artig (neuere Messungen zählen stärker) nur dann,
-    wenn es über dieselben Messungen deutlich genauer war als der gewöhnliche Durchschnitt."""
+    """Wählt unter allen Verfahren (EMA, Durchschnitt, Letztes Delta, Median, Zustands-Delta, Tageszeit-Profil) das mit
+    dem kleinsten mittleren Fehler im Prognose-Check. Zu wenig Daten oder kein klarer Unterschied (2 %):
+    Standardverfahren (EMA)."""
     wc, wmax = db().execute("SELECT COUNT(*), MAX(ts) FROM weigh WHERE user_id=?", (u,)).fetchone()
     key = (wc, wmax, db().execute("SELECT COUNT(*) FROM water WHERE user_id=?", (u,)).fetchone()[0],
            tuple(sorted(get_settings(u).items())))
     if u in _method_cache and _method_cache[u][0] == key:
         return _method_cache[u][1]
-    errs = {}
-    for name, hl in (("ema", HALF_LIFE_DAYS), ("avg", None)):
-        rows = [x["err"] for b in backtest(u, now, n=8, half_life=hl).values() for x in b["rows"]]
-        errs[name] = (len(rows), sum(abs(e) for e in rows) / len(rows) if rows else None)
-    n_ema, mae_ema = errs["ema"]
-    n_avg, mae_avg = errs["avg"]
-    use_ema = (n_ema == n_avg >= EMA_MIN_ROWS and mae_avg and mae_ema <= mae_avg * (1 - EMA_MIN_GAIN))
-    result = {"method": "ema" if use_ema else "avg", "half_life": HALF_LIFE_DAYS if use_ema else None,
-              "rows": n_ema, "mae_ema": None if mae_ema is None else round(mae_ema),
-              "mae_avg": None if mae_avg is None else round(mae_avg)}
+    runs = backtest_algos(u, now, 8, ALGOS)
+    maes = {}
+    for algo, per_plant in runs.items():
+        errs = [abs(x["err"]) for rows in per_plant.values() for x in rows]
+        maes[algo] = (len(errs), sum(errs) / len(errs) if errs else None)
+    rows = maes[DEFAULT_ALGO][0]
+    comparable = {a: m for a, (n, m) in maes.items() if n == rows and m is not None}
+    best = min(comparable, key=comparable.get) if rows >= METHOD_MIN_ROWS and comparable else DEFAULT_ALGO
+    if best != DEFAULT_ALGO and comparable[best] >= comparable[DEFAULT_ALGO] * (1 - METHOD_TIE):
+        best = DEFAULT_ALGO
+    result = {
+        "algo": best, "label": ALGO_LABELS[best], "rows": rows, "enough": rows >= METHOD_MIN_ROWS,
+        "mae": round(comparable[best]) if best in comparable else None,
+        "ranking": [{"algo": a, "label": ALGO_LABELS[a], "mae": round(m)}
+                    for a, m in sorted(comparable.items(), key=lambda x: x[1])],
+    }
     _method_cache[u] = (key, result)
     return result
 
@@ -1288,7 +1395,7 @@ def insights():
     now = now_utc()
     method = pick_method(uid(), now)
     return jsonify(week=week_summary(uid(), now), method=method,
-                   backtest=backtest(uid(), now, half_life=method["half_life"]))
+                   backtest=backtest(uid(), now, algo=method["algo"]))
 
 
 # ---------------------------------------------------------------- Export / Backup
