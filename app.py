@@ -11,6 +11,7 @@ import secrets
 import sqlite3
 import statistics
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -947,12 +948,13 @@ def delete_invite(token):
 
 
 # ---------------------------------------------------------------- Einstellungen
-SETTING_DEFAULTS = {"light_on": "17:00", "light_off": "11:00", "water_time": "17:30"}
+SETTING_DEFAULTS = {"light_on": "17:00", "light_off": "11:00", "water_time": "17:30",
+                    "remind_time": ""}  # Discord-Erinnerung; leer = aus
 
 
-def get_settings():
+def get_settings(u=None):
     st = dict(SETTING_DEFAULTS)
-    for r in db().execute("SELECT key, value FROM settings WHERE user_id=?", (uid(),)):
+    for r in db().execute("SELECT key, value FROM settings WHERE user_id=?", (u or uid(),)):
         if r["key"] in st:
             st[r["key"]] = r["value"]
     return st
@@ -964,7 +966,9 @@ def put_settings():
     for k in SETTING_DEFAULTS:
         if k in data:
             v = str(data[k]).strip()
-            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
+            if k == "remind_time" and v and not g.user["webhook"]:
+                return jsonify(error="Für die Erinnerung zuerst einen Discord-Webhook im Tab Konto hinterlegen."), 400
+            if not (k == "remind_time" and v == "") and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v):
                 return jsonify(error=f"Ungültige Uhrzeit ({k})"), 400
             db().execute("INSERT INTO settings(user_id, key, value) VALUES (?, ?, ?) "
                          "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (uid(), k, v))
@@ -1061,14 +1065,15 @@ def weight_at(pts, start, when):
     return pts[max(0, min(len(pts) - 1, idx))][1]
 
 
-def compute_assist(now=None):
+def compute_assist(now=None, u=None):
     """Richtwerte pro Pflanze: Zielgewicht (auto oder manuell), Verbrauch getrennt
     nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
     now = now or now_utc()
-    st = get_settings()
-    sessions, waters = weigh_sessions(), water_sessions()
+    u = u or uid()
+    st = get_settings(u)
+    sessions, waters = weigh_sessions(u), water_sessions(u)
     info, intervals = {}, {}
-    for p in plants():
+    for p in plants(u):
         if not p["active"]:
             continue
         k = p["key"]
@@ -1272,20 +1277,85 @@ def discord_post():
     if not hook or not WEBHOOK_RE.fullmatch(hook):
         return jsonify(error="Kein Discord-Webhook hinterlegt (Tab Konto)"), 400
     data = request.get_json(silent=True) or {}
-    text = data.get("text") or build_discord()
-    req = urllib.request.Request(
-        hook,
-        data=json.dumps({"content": text[:1990]}).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "GrowLog/1.0"},
-    )
     try:
-        urllib.request.urlopen(req, timeout=10).read()
+        post_webhook(hook, data.get("text") or build_discord())
     except urllib.error.URLError as exc:
         return jsonify(error=f"Discord: {exc}"), 502
     return jsonify(ok=True)
 
 
+def post_webhook(hook, text):
+    req = urllib.request.Request(
+        hook,
+        data=json.dumps({"content": text[:1990]}).encode(),
+        headers={"Content-Type": "application/json", "User-Agent": "GrowLog/1.0"},
+    )
+    urllib.request.urlopen(req, timeout=10).read()
+
+
+# ---------------------------------------------------------------- Gießerinnerung
+REMIND_GRACE = timedelta(hours=3)  # nach einem Neustart keine veralteten Erinnerungen mehr schicken
+
+
+def reminder_text(u, now):
+    st = get_settings(u)
+    lines = [f"🌱 Gießzeit {st['water_time']} – Richtwerte, entscheide nach Gefühl:"]
+    assist = compute_assist(now, u)
+    for p in plants(u):
+        a = assist.get(p["key"])
+        if not a:
+            continue
+        line = f"**{p['key']}** {a['current']} g"
+        if a["slot_expected"] is not None:
+            line += f" → erwartet {a['slot_expected']} g"
+        if a["target"]:
+            line += f" (Ziel {a['target']} g)"
+        if a["suggest_ml"]:
+            line += f" · ca. {a['suggest_ml']} ml"
+        lines.append(line)
+    return "\n".join(lines) if len(lines) > 1 else None
+
+
+def send_due_reminders(now=None):
+    """Schickt jedem Nutzer mit eingestellter Erinnerungszeit und Webhook einmal pro Tag den Hinweis."""
+    now = now or now_utc()
+    with app.app_context():
+        users = db().execute("SELECT id, webhook FROM users WHERE active=1 AND webhook IS NOT NULL").fetchall()
+        for user in users:
+            st = get_settings(user["id"])
+            if not st["remind_time"] or not WEBHOOK_RE.fullmatch(user["webhook"]):
+                continue
+            local = now.astimezone(TZ)
+            h, m = _hm(st["remind_time"])
+            due = datetime(local.year, local.month, local.day, h, m, tzinfo=TZ).astimezone(timezone.utc)
+            today = str(local.date())
+            last = db().execute("SELECT value FROM settings WHERE user_id=? AND key='remind_sent'",
+                                (user["id"],)).fetchone()
+            if not (due <= now < due + REMIND_GRACE) or (last and last["value"] == today):
+                continue
+            db().execute("INSERT INTO settings(user_id, key, value) VALUES (?, 'remind_sent', ?) "
+                         "ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value", (user["id"], today))
+            db().commit()  # erst markieren: bei Fehlern kein Dauerfeuer alle 30 s
+            text = reminder_text(user["id"], now)
+            if text:
+                try:
+                    post_webhook(user["webhook"], text)
+                except (urllib.error.URLError, OSError) as exc:
+                    app.logger.warning("Gießerinnerung für Nutzer %s fehlgeschlagen: %s", user["id"], exc)
+
+
+def reminder_loop():
+    while True:
+        time.sleep(30)
+        try:
+            send_due_reminders()
+        except Exception:  # der Hintergrund-Thread darf nie sterben
+            app.logger.exception("Gießerinnerung")
+
+
 init_db()
+if os.environ.get("GROWLOG_NO_SCHEDULER") != "1":  # gunicorn -w 1: genau ein Thread
+    threading.Thread(target=reminder_loop, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8087)))

@@ -5,6 +5,7 @@ import tempfile
 _TMP = tempfile.mkdtemp(prefix="growlog-test-")
 os.environ["DB_PATH"] = os.path.join(_TMP, "growlog.db")
 os.environ["SECRET_KEY"] = "test-secret"
+os.environ["GROWLOG_NO_SCHEDULER"] = "1"
 os.environ.pop("APP_PASSWORD", None)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

@@ -430,6 +430,7 @@ async function load() {
     $("#s-on").value = S.settings.light_on;
     $("#s-off").value = S.settings.light_off;
     $("#s-water").value = S.settings.water_time;
+    $("#s-remind").value = S.settings.remind_time;
   }
   $("#backup-hint").textContent = S.last_backup
     ? `Automatisches Tages-Backup in data/backups (14 Tage), zuletzt ${S.last_backup}.` : "";
@@ -443,7 +444,7 @@ async function load() {
 }
 $("#s-save").onclick = async () => {
   try {
-    await api("/api/settings", "PUT", { light_on: $("#s-on").value, light_off: $("#s-off").value, water_time: $("#s-water").value });
+    await api("/api/settings", "PUT", { light_on: $("#s-on").value, light_off: $("#s-off").value, water_time: $("#s-water").value, remind_time: $("#s-remind").value });
     toast("Zeiten gespeichert");
     await load();
   } catch (e) { toast(e.message, true); }
