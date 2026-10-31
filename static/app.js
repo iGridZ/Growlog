@@ -87,10 +87,19 @@ function renderWeighForm() {
       return `<div class="plant"><div class="name"><b>${p.key}</b><small>${p.name}${
         lw ? ` · zuletzt ${lw.values[p.key]} g` : ""
       }</small><div class="delta" id="wd-${p.key}"></div></div>
-      <input type="number" inputmode="numeric" data-k="${p.key}" placeholder="g" value="${keep[p.key] || ""}"></div>`;
+      <input type="number" inputmode="numeric" enterkeyhint="next" data-k="${p.key}" placeholder="g" value="${keep[p.key] || ""}"></div>`;
     })
     .join("");
-  document.querySelectorAll("#w-fields input").forEach((i) => i.addEventListener("input", liveDelta));
+  const inputs = [...document.querySelectorAll("#w-fields input")];
+  inputs.forEach((i, n) => {
+    i.addEventListener("input", liveDelta);
+    i.addEventListener("keydown", (e) => {  // Enter springt zum nächsten Feld, im letzten zum Speichern-Knopf
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      (inputs[n + 1] || $("#w-save")).focus();
+    });
+  });
+  if (inputs.length) inputs.at(-1).enterKeyHint = "done";
   liveDelta();
 }
 function liveDelta() {
