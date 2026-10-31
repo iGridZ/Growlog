@@ -197,6 +197,7 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
   }));
   const all = pts.flatMap((s) => shown.flatMap((p) => (p.key in s.values ? [s.values[p.key]] : [])));
   if (!all.length) return ($(el).innerHTML = '<p class="hint">Keine Pflanze ausgewählt.</p>');
+  const W = 600, H = 240, L = 52, R = 10, T = 10, B = 24;
   let min = Math.min(...all), max = Math.max(...all);
   const pad10 = Math.max(10, (max - min) * 0.1);
   min -= pad10; max += pad10;
