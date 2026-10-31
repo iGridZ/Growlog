@@ -1065,26 +1065,32 @@ def weight_at(pts, start, when):
     return pts[max(0, min(len(pts) - 1, idx))][1]
 
 
-def compute_assist(now=None, u=None):
-    """Richtwerte pro Pflanze: Zielgewicht (auto oder manuell), Verbrauch getrennt
-    nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
-    now = now or now_utc()
-    u = u or uid()
+def plant_series(k, sessions, waters):
+    """Messungen einer Pflanze, ihre Gießvorgänge und je Messung: war es die erste nach dem Gießen?"""
+    entries = [(s["ts"], s["values"][k]) for s in sessions if k in s["values"]]
+    wlist = [w for w in waters if k in w["ml"]]
+    post, prev = [], ""
+    for ts, _g in entries:
+        post.append(any(prev < w["ts"] <= ts for w in wlist))
+        prev = ts
+    return entries, wlist, post
+
+
+def model_state(u, now, until=None):
+    """Passt das Verbrauchsmodell an die Daten an (mit `until` nur an Daten bis dahin, für den Prognose-Check)."""
     st = get_settings(u)
     sessions, waters = weigh_sessions(u), water_sessions(u)
+    if until:
+        sessions = [s for s in sessions if s["ts"] <= until]
+        waters = [w for w in waters if w["ts"] <= until]
     info, intervals = {}, {}
     for p in plants(u):
         if not p["active"]:
             continue
         k = p["key"]
-        entries = [(s["ts"], s["values"][k]) for s in sessions if k in s["values"]]
+        entries, wlist, post = plant_series(k, sessions, waters)
         if not entries:
             continue
-        wlist = [w for w in waters if k in w["ml"]]
-        post, prev = [], ""
-        for ts, _g in entries:
-            post.append(any(prev < w["ts"] <= ts for w in wlist))  # erste Messung nach dem Gießen
-            prev = ts
 
         auto_target = None
         for i in range(len(entries) - 1, -1, -1):
@@ -1116,7 +1122,14 @@ def compute_assist(now=None, u=None):
         info[k] = {"plant": p, "entries": entries, "ratio": ratio, "auto_target": auto_target}
 
     rates, r, growth = fit_model(intervals, now) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
+    return st, info, rates, r, growth
 
+
+def compute_assist(now=None, u=None):
+    """Richtwerte pro Pflanze: Zielgewicht (auto oder manuell), Verbrauch getrennt
+    nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
+    now = now or now_utc()
+    st, info, rates, r, growth = model_state(u or uid(), now)
     out = {}
     for k, d in info.items():
         p, entries, ratio = d["plant"], d["entries"], d["ratio"]
@@ -1150,6 +1163,72 @@ def compute_assist(now=None, u=None):
             res["suggest_ml"] = int(round((target - cur) / ratio / 5.0) * 5)
         out[k] = res
     return out
+
+
+def local_midnight_after(t):
+    d = t.astimezone(TZ).date() + timedelta(days=1)
+    return datetime(d.year, d.month, d.day, tzinfo=TZ).astimezone(timezone.utc)
+
+
+def week_summary(u, now):
+    """Letzte 7 Tage: gegossene ml und Gewichtsverlust (g) je Tag. Intervalle über Mitternacht werden anteilig verteilt;
+    Intervalle mit Gießen zählen nicht zum Verlust."""
+    today = now.astimezone(TZ).date()
+    days = {today - timedelta(days=i): {"ml": 0, "loss": 0.0} for i in range(6, -1, -1)}
+    for w in water_sessions(u):
+        d = loc(w["ts"]).date()
+        if d in days:
+            days[d]["ml"] += sum(w["ml"].values())
+    sessions, waters = weigh_sessions(u), water_sessions(u)
+    for p in plants(u):
+        entries, _w, post = plant_series(p["key"], sessions, waters)
+        for i in range(1, len(entries)):
+            t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
+            loss = entries[i - 1][1] - entries[i][1]
+            if post[i] or loss < 0 or t1 <= t0:
+                continue
+            cur = t0
+            while cur < t1:
+                end = min(t1, local_midnight_after(cur))
+                d = cur.astimezone(TZ).date()
+                if d in days:
+                    days[d]["loss"] += loss * (end - cur) / (t1 - t0)
+                cur = end
+    rows = [{"date": day_label(d), "ml": v["ml"], "loss": round(v["loss"])} for d, v in days.items()]
+    return {"days": rows, "ml_total": sum(r["ml"] for r in rows), "loss_total": sum(r["loss"] for r in rows)}
+
+
+def backtest(u, now, n=6):
+    """Prognose-Check: für die letzten Messungen ohne Gießen die Vorhersage nachrechnen, die das Modell mit dem
+    Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen."""
+    sessions, waters = weigh_sessions(u), water_sessions(u)
+    out = {}
+    for p in plants(u):
+        if not p["active"]:
+            continue
+        k = p["key"]
+        entries, _w, post = plant_series(k, sessions, waters)
+        rows = []
+        for i in range(max(1, len(entries) - n), len(entries)):
+            t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
+            if post[i] or not 3 <= (t1 - t0).total_seconds() / 3600 <= 36:
+                continue
+            st, _info, rates, r, growth = model_state(u, t0, until=entries[i - 1][0])
+            if not rates.get(k):
+                continue
+            pts = project(entries[i - 1][1], t0, rates[k], r, growth, st, days=2)
+            predicted = round(weight_at(pts, t0, t1))
+            rows.append({"ts": entries[i][0], "predicted": predicted, "actual": entries[i][1],
+                         "err": entries[i][1] - predicted})
+        if rows:
+            out[k] = {"rows": rows, "mae": round(sum(abs(x["err"]) for x in rows) / len(rows))}
+    return out
+
+
+@app.get("/api/insights")
+def insights():
+    now = now_utc()
+    return jsonify(week=week_summary(uid(), now), backtest=backtest(uid(), now))
 
 
 # ---------------------------------------------------------------- Export / Backup

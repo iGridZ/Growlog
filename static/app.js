@@ -209,8 +209,25 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
     .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</span>`).join("") +
     (water && water.length ? '<span><i style="background:var(--accent);opacity:.6"></i>Gießen</span>' : "");
 }
+async function renderInsights() {
+  try {
+    const d = await api("/api/insights");
+    $("#week").innerHTML = d.week.days.map((x) =>
+      `<div class="item"><div class="when">${x.date}</div><div class="vals">${x.ml} ml gegossen · ${x.loss} g Verbrauch</div></div>`).join("") +
+      `<p class="hint">Woche: ${d.week.ml_total} ml gegossen, ${d.week.loss_total} g Verbrauch (ohne Intervalle mit Gießen).</p>`;
+    const keys = Object.keys(d.backtest);
+    const rows = keys.map((k) => {
+      const b = d.backtest[k];
+      return `<div class="when"><b>${esc(k)}</b> · Ø Abweichung ${b.mae} g</div>` + b.rows.map((r) =>
+        `<small>${fmtTs(r.ts)}: erwartet ${r.predicted} g, real ${r.actual} g (${sign(r.err)})</small>`).join("<br>");
+    }).join("");
+    $("#backtest").innerHTML = (rows || '<p class="hint">Noch zu wenig Daten (mehrere Messungen ohne Gießen nötig).</p>') +
+      '<p class="hint">So nah lag die Prognose mit dem Wissen der vorherigen Messung am echten Gewicht. Positiv = Pflanze war schwerer als erwartet.</p>';
+  } catch (e) { /* offline: Karte bleibt leer */ }
+}
 function renderLog() {
   renderChart();
+  renderInsights();
   $("#weigh-list").innerHTML = [...S.weigh].reverse().slice(0, 30).map((s) => {
     const vals = S.plants.filter((p) => p.key in s.values).map((p) => {
       const d = s.delta[p.key];
