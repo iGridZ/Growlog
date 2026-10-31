@@ -249,11 +249,10 @@ async function renderInsights() {
         `<small>${fmtTs(r.ts)}: erwartet ${r.predicted} g, real ${r.actual} g (${sign(r.err)})</small>`).join("<br>");
     }).join("");
     const m = d.method;
-    const how = m.method === "ema"
-      ? `Verfahren: neuere Messungen zählen stärker (EMA). Ø Fehler ${m.mae_ema} g statt ${m.mae_avg} g beim Durchschnitt.`
-      : m.mae_ema == null || m.rows < 4
-        ? "Verfahren: Durchschnitt. Für den Vergleich mit EMA fehlen noch Messungen."
-        : `Verfahren: Durchschnitt. EMA war nicht deutlich genauer (${m.mae_ema} g gegen ${m.mae_avg} g).`;
+    const how = !m.enough
+      ? `Verfahren: ${m.label} (Standard). Für den Vergleich der Verfahren fehlen noch Messungen.`
+      : `Verfahren: ${m.label}, gewählt als genaueste von 12 Varianten. Ø Fehler ${m.mae} g` +
+        (m.mae_average != null && m.mae_average !== m.mae ? `, einfacher Durchschnitt ${m.mae_average} g.` : ".");
     $("#backtest").innerHTML = `<p class="hint">${how}</p>` + (rows || '<p class="hint">Noch zu wenig Daten (mehrere Messungen ohne Gießen nötig).</p>') +
       '<p class="hint">So nah lag die Prognose mit dem Wissen der vorherigen Messung am echten Gewicht. Positiv = Pflanze war schwerer als erwartet.</p>';
   } catch (e) { /* offline: Karte bleibt leer */ }

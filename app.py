@@ -1157,7 +1157,9 @@ def compute_assist(now=None, u=None):
     nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
     now = now or now_utc()
     u = u or uid()
-    st, info, rates, r, growth = model_state(u, now, half_life=pick_method(u, now)["half_life"])
+    method = pick_method(u, now)
+    st, info, rates, r, growth = model_state(u, now, half_life=method["half_life"])
+    growth *= method["growth_scale"]
     out = {}
     for k, d in info.items():
         p, entries, ratio = d["plant"], d["entries"], d["ratio"]
@@ -1227,58 +1229,89 @@ def week_summary(u, now):
     return {"days": rows, "ml_total": sum(r["ml"] for r in rows), "loss_total": sum(r["loss"] for r in rows)}
 
 
-def backtest(u, now, n=6, half_life=HALF_LIFE_DAYS):
+HALF_LIVES = (None, 1.0, 2.0, 4.0)   # None = gewöhnlicher Durchschnitt, sonst EMA-artige Gewichtung (Halbwertszeit in Tagen)
+GROWTH_SCALES = (1.0, 0.5, 0.0)      # Wachstumstrend voll, gedämpft (halb) oder aus
+DEFAULT_METHOD = (HALF_LIFE_DAYS, 1.0)
+METHOD_MIN_ROWS = 4                  # so viele nachgerechnete Prognosen braucht der Vergleich mindestens
+METHOD_TIE = 0.02                    # weniger als 2 % Unterschied zählt als gleich: dann bleibt das Standardverfahren
+_method_cache = {}
+
+
+def method_label(half_life, scale):
+    base = "Durchschnitt" if half_life is None else f"EMA {half_life:g} Tage"
+    return f"{base}, Wachstum {'voll' if scale == 1 else 'halb' if scale else 'aus'}"
+
+
+def backtest_methods(u, now, n, methods):
     """Prognose-Check: für die letzten Messungen ohne Gießen die Vorhersage nachrechnen, die das Modell mit dem
-    Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen."""
+    Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen.
+    methods: [(half_life, growth_scale)] -> {methode: {pflanze: [Zeilen]}}. Das Anpassen hängt nur von der
+    Halbwertszeit ab und wird je Zeitpunkt nur einmal gerechnet."""
     sessions, waters = weigh_sessions(u), water_sessions(u)
-    out = {}
+    fits = {}
+    out = {m: {} for m in methods}
     for p in plants(u):
         if not p["active"]:
             continue
         k = p["key"]
         entries, _w, post = plant_series(k, sessions, waters)
-        rows = []
         for i in range(max(1, len(entries) - n), len(entries)):
             t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
             if post[i] or not 3 <= (t1 - t0).total_seconds() / 3600 <= 36:
                 continue
             if entries[i][1] - entries[i - 1][1] >= UNLOGGED_MIN_GAIN:  # vergessenes Gießen, keine Prognose-Frage
                 continue
-            st, _info, rates, r, growth = model_state(u, t0, until=entries[i - 1][0], half_life=half_life)
-            if not rates.get(k):
-                continue
-            pts = project(entries[i - 1][1], t0, rates[k], r, growth, st, days=2)
-            predicted = round(weight_at(pts, t0, t1))
-            rows.append({"ts": entries[i][0], "predicted": predicted, "actual": entries[i][1],
-                         "err": entries[i][1] - predicted})
-        if rows:
-            out[k] = {"rows": rows, "mae": round(sum(abs(x["err"]) for x in rows) / len(rows))}
+            for half_life, scale in methods:
+                fkey = (entries[i - 1][0], half_life)
+                if fkey not in fits:
+                    fits[fkey] = model_state(u, t0, until=entries[i - 1][0], half_life=half_life)
+                st, _info, rates, r, growth = fits[fkey]
+                if not rates.get(k):
+                    continue
+                pts = project(entries[i - 1][1], t0, rates[k], r, growth * scale, st, days=2)
+                predicted = round(weight_at(pts, t0, t1))
+                out[(half_life, scale)].setdefault(k, []).append(
+                    {"ts": entries[i][0], "predicted": predicted, "actual": entries[i][1],
+                     "err": entries[i][1] - predicted})
     return out
 
 
-EMA_MIN_ROWS = 4        # so viele nachgerechnete Prognosen braucht der Vergleich mindestens
-EMA_MIN_GAIN = 0.10     # EMA muss den Fehler um mindestens 10 % senken, sonst bleibt es beim Durchschnitt
-_method_cache = {}
+def backtest(u, now, n=6, method=DEFAULT_METHOD):
+    per_plant = backtest_methods(u, now, n, [method])[method]
+    return {k: {"rows": rows, "mae": round(sum(abs(x["err"]) for x in rows) / len(rows))}
+            for k, rows in per_plant.items()}
 
 
 def pick_method(u, now):
-    """Wählt das Gewichtungsverfahren per Prognose-Check: EMA-artig (neuere Messungen zählen stärker) nur dann,
-    wenn es über dieselben Messungen deutlich genauer war als der gewöhnliche Durchschnitt."""
+    """Wählt unter Durchschnitt und EMA-Varianten (je mit vollem, halbem oder ohne Wachstumstrend) das Verfahren
+    mit dem kleinsten mittleren Fehler im Prognose-Check. Zu wenig Daten oder kein klarer Unterschied (2 %):
+    Standardverfahren (EMA mit 2 Tagen Halbwertszeit)."""
     wc, wmax = db().execute("SELECT COUNT(*), MAX(ts) FROM weigh WHERE user_id=?", (u,)).fetchone()
     key = (wc, wmax, db().execute("SELECT COUNT(*) FROM water WHERE user_id=?", (u,)).fetchone()[0],
            tuple(sorted(get_settings(u).items())))
     if u in _method_cache and _method_cache[u][0] == key:
         return _method_cache[u][1]
-    errs = {}
-    for name, hl in (("ema", HALF_LIFE_DAYS), ("avg", None)):
-        rows = [x["err"] for b in backtest(u, now, n=8, half_life=hl).values() for x in b["rows"]]
-        errs[name] = (len(rows), sum(abs(e) for e in rows) / len(rows) if rows else None)
-    n_ema, mae_ema = errs["ema"]
-    n_avg, mae_avg = errs["avg"]
-    use_ema = (n_ema == n_avg >= EMA_MIN_ROWS and mae_avg and mae_ema <= mae_avg * (1 - EMA_MIN_GAIN))
-    result = {"method": "ema" if use_ema else "avg", "half_life": HALF_LIFE_DAYS if use_ema else None,
-              "rows": n_ema, "mae_ema": None if mae_ema is None else round(mae_ema),
-              "mae_avg": None if mae_avg is None else round(mae_avg)}
+    methods = [DEFAULT_METHOD] + [(h, s) for h in HALF_LIVES for s in GROWTH_SCALES if (h, s) != DEFAULT_METHOD]
+    runs = backtest_methods(u, now, 8, methods)
+    table = []
+    for m, per_plant in runs.items():
+        errs = [abs(x["err"]) for rows in per_plant.values() for x in rows]
+        table.append({"method": m, "n": len(errs), "mae": sum(errs) / len(errs) if errs else None})
+    rows = table[0]["n"]
+    comparable = [t for t in table if t["n"] == rows and t["mae"] is not None]
+    best = min(comparable, key=lambda t: t["mae"]) if rows >= METHOD_MIN_ROWS and comparable else None
+    default = table[0]
+    if best is None or best["mae"] >= default["mae"] * (1 - METHOD_TIE):
+        best = default
+    half_life, scale = best["method"]
+    avg = next((t for t in table if t["method"] == (None, 1.0)), None)
+    result = {
+        "half_life": half_life, "growth_scale": scale, "label": method_label(half_life, scale), "rows": rows,
+        "mae": None if best["mae"] is None else round(best["mae"]),
+        "mae_default": None if default["mae"] is None else round(default["mae"]),
+        "mae_average": None if not avg or avg["mae"] is None else round(avg["mae"]),
+        "enough": rows >= METHOD_MIN_ROWS,
+    }
     _method_cache[u] = (key, result)
     return result
 
@@ -1288,7 +1321,7 @@ def insights():
     now = now_utc()
     method = pick_method(uid(), now)
     return jsonify(week=week_summary(uid(), now), method=method,
-                   backtest=backtest(uid(), now, half_life=method["half_life"]))
+                   backtest=backtest(uid(), now, method=(method["half_life"], method["growth_scale"])))
 
 
 # ---------------------------------------------------------------- Export / Backup
