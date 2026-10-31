@@ -28,6 +28,7 @@ def clean_db(monkeypatch):
     conn.commit()
     conn.close()
     growlog._attempts.clear()
+    growlog._method_cache.clear()
     yield
 
 

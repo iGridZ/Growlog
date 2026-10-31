@@ -1006,12 +1006,14 @@ DEFAULT_DARK_RATIO = 0.25
 DEFAULT_GROWTH = 0.03  # Verbrauchszuwachs pro Tag, wenn zu wenig Daten für eine Schätzung da sind
 
 
-def fit_model(intervals, now):
+def fit_model(intervals, now, half_life=HALF_LIFE_DAYS):
     """intervals: {pflanze: [(ende, verlust_g, licht_h, dunkel_h)]}.
     Verlust ≈ a · (licht_h + r · dunkel_h). a = Verbrauch pro Lichtstunde (neuere Messungen
     stärker gewichtet), r = Dunkel/Licht-Verhältnis (gemeinsam geschätzt), k = Wachstum pro Tag."""
-    def wgt(end):
-        return 0.5 ** (max(0.0, (now - end).total_seconds() / 86400) / HALF_LIFE_DAYS)
+    def wgt(end):  # half_life None = gewöhnlicher Durchschnitt (alle Messungen gleich schwer)
+        if not half_life:
+            return 1.0
+        return 0.5 ** (max(0.0, (now - end).total_seconds() / 86400) / half_life)
 
     def fit_a(rows, r):
         num = sum(wgt(e) * (li + r * da) * loss for e, loss, li, da in rows)
@@ -1076,7 +1078,7 @@ def plant_series(k, sessions, waters):
     return entries, wlist, post
 
 
-def model_state(u, now, until=None):
+def model_state(u, now, until=None, half_life=HALF_LIFE_DAYS):
     """Passt das Verbrauchsmodell an die Daten an (mit `until` nur an Daten bis dahin, für den Prognose-Check)."""
     st = get_settings(u)
     sessions, waters = weigh_sessions(u), water_sessions(u)
@@ -1121,7 +1123,7 @@ def model_state(u, now, until=None):
             intervals[k] = rows
         info[k] = {"plant": p, "entries": entries, "post": post, "ratio": ratio, "auto_target": auto_target}
 
-    rates, r, growth = fit_model(intervals, now) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
+    rates, r, growth = fit_model(intervals, now, half_life) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
     for k, d in info.items():
         d["unlogged"] = unlogged_waterings(d["entries"], d["post"], d["ratio"], rates.get(k), r, st)
     return st, info, rates, r, growth
@@ -1154,7 +1156,8 @@ def compute_assist(now=None, u=None):
     """Richtwerte pro Pflanze: Zielgewicht (auto oder manuell), Verbrauch getrennt
     nach Licht/Dunkel, Prognose zur nächsten Gießzeit und ml-Vorschlag."""
     now = now or now_utc()
-    st, info, rates, r, growth = model_state(u or uid(), now)
+    u = u or uid()
+    st, info, rates, r, growth = model_state(u, now, half_life=pick_method(u, now)["half_life"])
     out = {}
     for k, d in info.items():
         p, entries, ratio = d["plant"], d["entries"], d["ratio"]
@@ -1224,7 +1227,7 @@ def week_summary(u, now):
     return {"days": rows, "ml_total": sum(r["ml"] for r in rows), "loss_total": sum(r["loss"] for r in rows)}
 
 
-def backtest(u, now, n=6):
+def backtest(u, now, n=6, half_life=HALF_LIFE_DAYS):
     """Prognose-Check: für die letzten Messungen ohne Gießen die Vorhersage nachrechnen, die das Modell mit dem
     Wissen der vorherigen Messung gemacht hätte, und mit dem echten Gewicht vergleichen."""
     sessions, waters = weigh_sessions(u), water_sessions(u)
@@ -1239,7 +1242,9 @@ def backtest(u, now, n=6):
             t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
             if post[i] or not 3 <= (t1 - t0).total_seconds() / 3600 <= 36:
                 continue
-            st, _info, rates, r, growth = model_state(u, t0, until=entries[i - 1][0])
+            if entries[i][1] - entries[i - 1][1] >= UNLOGGED_MIN_GAIN:  # vergessenes Gießen, keine Prognose-Frage
+                continue
+            st, _info, rates, r, growth = model_state(u, t0, until=entries[i - 1][0], half_life=half_life)
             if not rates.get(k):
                 continue
             pts = project(entries[i - 1][1], t0, rates[k], r, growth, st, days=2)
@@ -1251,10 +1256,39 @@ def backtest(u, now, n=6):
     return out
 
 
+EMA_MIN_ROWS = 4        # so viele nachgerechnete Prognosen braucht der Vergleich mindestens
+EMA_MIN_GAIN = 0.10     # EMA muss den Fehler um mindestens 10 % senken, sonst bleibt es beim Durchschnitt
+_method_cache = {}
+
+
+def pick_method(u, now):
+    """Wählt das Gewichtungsverfahren per Prognose-Check: EMA-artig (neuere Messungen zählen stärker) nur dann,
+    wenn es über dieselben Messungen deutlich genauer war als der gewöhnliche Durchschnitt."""
+    wc, wmax = db().execute("SELECT COUNT(*), MAX(ts) FROM weigh WHERE user_id=?", (u,)).fetchone()
+    key = (wc, wmax, db().execute("SELECT COUNT(*) FROM water WHERE user_id=?", (u,)).fetchone()[0],
+           tuple(sorted(get_settings(u).items())))
+    if u in _method_cache and _method_cache[u][0] == key:
+        return _method_cache[u][1]
+    errs = {}
+    for name, hl in (("ema", HALF_LIFE_DAYS), ("avg", None)):
+        rows = [x["err"] for b in backtest(u, now, n=8, half_life=hl).values() for x in b["rows"]]
+        errs[name] = (len(rows), sum(abs(e) for e in rows) / len(rows) if rows else None)
+    n_ema, mae_ema = errs["ema"]
+    n_avg, mae_avg = errs["avg"]
+    use_ema = (n_ema == n_avg >= EMA_MIN_ROWS and mae_avg and mae_ema <= mae_avg * (1 - EMA_MIN_GAIN))
+    result = {"method": "ema" if use_ema else "avg", "half_life": HALF_LIFE_DAYS if use_ema else None,
+              "rows": n_ema, "mae_ema": None if mae_ema is None else round(mae_ema),
+              "mae_avg": None if mae_avg is None else round(mae_avg)}
+    _method_cache[u] = (key, result)
+    return result
+
+
 @app.get("/api/insights")
 def insights():
     now = now_utc()
-    return jsonify(week=week_summary(uid(), now), backtest=backtest(uid(), now))
+    method = pick_method(uid(), now)
+    return jsonify(week=week_summary(uid(), now), method=method,
+                   backtest=backtest(uid(), now, half_life=method["half_life"]))
 
 
 # ---------------------------------------------------------------- Export / Backup
