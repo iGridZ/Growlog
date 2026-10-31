@@ -176,11 +176,27 @@ $("#g-save").onclick = async () => {
 };
 
 // ---------- Verlauf
+const HIDDEN = {};  // je Diagramm die abgewählten Pflanzen (Mehrfachauswahl über die Legende)
 function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#legend", water = S.water) {
   const pts = weigh.slice(-24);
   if (pts.length < 2) return ($(el).innerHTML = '<p class="hint">Mindestens zwei Einträge nötig.</p>');
-  const W = 600, H = 240, L = 52, R = 10, T = 10, B = 24;
-  const all = pts.flatMap((s) => Object.values(s.values));
+  const hidden = (HIDDEN[lg] = HIDDEN[lg] || new Set());
+  const shown = plants.filter((p) => !hidden.has(p.key));
+  const again = () => renderChart(weigh, plants, el, lg, water);
+  $(lg).innerHTML = `<button type="button" data-all>${hidden.size ? "Alle" : "Keine"}</button>` + plants
+    .map((p, i) => `<button type="button" data-ck="${esc(p.key)}" class="${hidden.has(p.key) ? "off" : ""}"><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</button>`).join("") +
+    (water && water.length ? '<span><i style="background:var(--accent);opacity:.6"></i>Gießen</span>' : "");
+  $(lg).querySelector("[data-all]").onclick = () => {
+    if (hidden.size) hidden.clear(); else plants.forEach((p) => hidden.add(p.key));
+    again();
+  };
+  $(lg).querySelectorAll("[data-ck]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.ck;
+    if (hidden.has(k)) hidden.delete(k); else hidden.add(k);
+    again();
+  }));
+  const all = pts.flatMap((s) => shown.flatMap((p) => (p.key in s.values ? [s.values[p.key]] : [])));
+  if (!all.length) return ($(el).innerHTML = '<p class="hint">Keine Pflanze ausgewählt.</p>');
   let min = Math.min(...all), max = Math.max(...all);
   const pad10 = Math.max(10, (max - min) * 0.1);
   min -= pad10; max += pad10;
@@ -198,6 +214,7 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
     svg += `<line x1="${x(w.ts)}" x2="${x(w.ts)}" y1="${T}" y2="${H - B}" stroke="${css("--accent")}" stroke-width="1.5" stroke-dasharray="4 4" opacity=".6"/>`;
   });
   plants.forEach((p, i) => {
+    if (hidden.has(p.key)) return;
     const line = pts.filter((s) => p.key in s.values).map((s) => `${x(s.ts)},${y(s.values[p.key])}`);
     if (line.length) svg += `<polyline fill="none" stroke="${css(COLORS[i % 5])}" stroke-width="2.5" points="${line.join(" ")}"/>`;
   });
@@ -205,9 +222,6 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
     svg += `<text x="${i ? W - R : L}" y="${H - 6}" text-anchor="${i ? "end" : "start"}" font-size="15" fill="${css("--muted")}">${fmtTs(s.ts)}</text>`;
   });
   $(el).innerHTML = svg + "</svg>";
-  $(lg).innerHTML = plants
-    .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</span>`).join("") +
-    (water && water.length ? '<span><i style="background:var(--accent);opacity:.6"></i>Gießen</span>' : "");
 }
 async function renderInsights() {
   try {
