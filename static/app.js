@@ -59,8 +59,20 @@ function renderAssist() {
       `<span class="muted">${toTarget != null ? sign(toTarget) + " g zum Ziel" : ""}</span></div>` +
       (a.target ? `<small>Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}</small>` : "") +
       (a.rate_lit != null ? `<small>Verbrauch: Licht ~${dnum(a.rate_lit)} g/h · Dunkel ~${dnum(a.rate_dark)} g/h · ≈ ${a.use24} g/Tag</small>` : "") +
-      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") + `</div>`;
-  }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Ob gegossen wird, entscheidest du nach Gefühl. Das Ziel kannst du im Tab „Pflanzen“ selbst setzen.</p>';
+      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") +
+      a.unlogged.map((u) => `<div class="as-due">Gießen vergessen? ${fmtTs(u.ts)}: +${u.gain} g → ca. <b>${u.ml} ml</b> (±${u.tol}) ` +
+        `<button data-unlogged="${esc(p.key)}|${u.ts}|${u.ml}">Eintragen</button></div>`).join("") + `</div>`;
+  }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Ob gegossen wird, entscheidest du nach Gefühl. Das Ziel kannst du im Tab „Pflanzen“ selbst setzen. Vermutete Gießmengen kommen aus dem Gewichtssprung und deinen eingetragenen Gießvorgängen (g pro ml).</p>';
+  document.querySelectorAll("[data-unlogged]").forEach((b) => (b.onclick = async () => {
+    const [key, ts, ml] = b.dataset.unlogged.split("|");
+    const val = prompt(`Gießmenge für ${key} in ml eintragen:`, ml);
+    if (!val) return;
+    try {
+      await api("/api/water", "POST", { ts, ml: { [key]: val } });
+      toast("Gießen eingetragen");
+      await load();
+    } catch (e) { toast(e.message, true); }
+  }));
 }
 
 // ---------- Tabs

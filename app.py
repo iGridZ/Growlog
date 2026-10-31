@@ -1119,10 +1119,35 @@ def model_state(u, now, until=None):
                 rows.append((t1, loss, lit, hrs - lit))
         if rows:
             intervals[k] = rows
-        info[k] = {"plant": p, "entries": entries, "ratio": ratio, "auto_target": auto_target}
+        info[k] = {"plant": p, "entries": entries, "post": post, "ratio": ratio, "auto_target": auto_target}
 
     rates, r, growth = fit_model(intervals, now) if intervals else ({}, DEFAULT_DARK_RATIO, DEFAULT_GROWTH)
+    for k, d in info.items():
+        d["unlogged"] = unlogged_waterings(d["entries"], d["post"], d["ratio"], rates.get(k), r, st)
     return st, info, rates, r, growth
+
+
+UNLOGGED_MIN_GAIN = 40  # g Zunahme ohne Gießeintrag, ab der ein vergessenes Gießen vermutet wird
+ML_TOLERANCE = 5        # ml: Gießmengen werden nie genau abgemessen
+
+
+def unlogged_waterings(entries, post, ratio, rate, dark_ratio, st):
+    """Gewichtssprünge ohne Gießeintrag. Menge = (Zunahme + erwarteter Verbrauch im Intervall) / g-pro-ml-Verhältnis,
+    das Verhältnis stammt nur aus eingetragenen Gießvorgängen."""
+    found = []
+    for i in range(1, len(entries)):
+        gain = entries[i][1] - entries[i - 1][1]
+        if post[i] or gain < UNLOGGED_MIN_GAIN:
+            continue
+        used = 0.0
+        if rate:
+            t0, t1 = parse_ts(entries[i - 1][0]), parse_ts(entries[i][0])
+            lit = lit_hours(t0, t1, st["light_on"], st["light_off"])
+            used = rate * (lit + dark_ratio * ((t1 - t0).total_seconds() / 3600 - lit))
+        ml = int(round((gain + used) / ratio / 5.0) * 5)
+        if 0 < ml < 5000:
+            found.append({"ts": entries[i][0], "gain": gain, "ml": ml, "tol": ML_TOLERANCE})
+    return found
 
 
 def compute_assist(now=None, u=None):
@@ -1142,6 +1167,7 @@ def compute_assist(now=None, u=None):
             "target": target, "target_manual": bool(p["target"]), "auto_target": d["auto_target"],
             "ratio": round(ratio, 2), "use24": None, "rate_lit": None, "rate_dark": None,
             "slot_at": None, "slot_expected": None, "slot_today": None, "suggest_ml": 0,
+            "unlogged": [e for e in d["unlogged"] if now - parse_ts(e["ts"]) <= timedelta(days=3)],
         }
         if a:
             pts = project(cur, start, a, r, growth, st)
