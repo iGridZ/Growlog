@@ -74,9 +74,6 @@ button.link { background: none; border: 0; color: var(--muted); font-size: .8rem
 .as { margin-bottom: 14px; }
 .as-head { display: flex; justify-content: space-between; font-size: 1.05rem; }
 .muted { color: var(--muted); font-size: .85rem; }
-.bar { height: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; margin: 6px 0; }
-.bar i { display: block; height: 100%; background: var(--accent); }
-.bar.low i { background: var(--danger); }
 .as small { color: var(--muted); }
 .as-due { font-size: .85rem; margin-top: 2px; }
 button.sug { padding: 2px 0; text-align: left; }

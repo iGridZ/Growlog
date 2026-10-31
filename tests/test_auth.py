@@ -59,6 +59,28 @@ def test_invite_is_single_use(admin, make_client):
     assert make_client().post("/register", data=data).status_code == 400
 
 
+def test_register_with_bad_token_is_rate_limited(make_client):
+    c = make_client()
+    data = {"token": "falsch", "username": "neu", "password": "geheim123", "password2": "geheim123"}
+    for _ in range(10):
+        assert c.post("/register", data=data).status_code == 400
+    assert c.post("/register", data=data).status_code == 429
+
+
+def test_cross_site_writes_are_blocked(login):
+    c, _ = login("anna")
+    body = {"name": "Alpha", "key": "AA"}
+    assert c.post("/api/plants", json=body, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert c.post("/api/plants", json=body, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert c.post("/api/plants", json=body, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert c.get("/api/state").get_json()["plants"] == []
+    assert c.post("/api/plants", json=body, headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert c.post("/api/plants", json={"name": "Beta", "key": "BB"},
+                  headers={"Origin": "http://localhost"}).status_code == 200
+    assert c.post("/api/plants", json={"name": "Gamma", "key": "CC"},
+                  headers={"Origin": "https://growlog.example", "X-Forwarded-Host": "growlog.example"}).status_code == 200
+
+
 def test_admin_endpoints_forbidden_for_user(login):
     c, _ = login("anna")
     assert c.get("/api/users").status_code == 403

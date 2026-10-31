@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, g, jsonify, redirect, request, send_file, send_from_directory
@@ -288,6 +289,22 @@ WEBHOOK_RE = re.compile(r"https://(?:discord|discordapp)\.com/api/webhooks/\d+/[
 
 
 @app.before_request
+def block_cross_site_writes():
+    """CSRF-Schutz: schreibende Anfragen nur von der eigenen Seite. Moderne Browser senden
+    Sec-Fetch-Site; ältere nur Origin, das gegen Host (bzw. den Host des Proxys) geprüft wird."""
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    site = request.headers.get("Sec-Fetch-Site")
+    if site:
+        ok = site in ("same-origin", "none")
+    else:
+        origin = request.headers.get("Origin")
+        hosts = {request.host, request.headers.get("X-Forwarded-Host", "")}
+        ok = not origin or urlsplit(origin).netloc in hosts
+    return None if ok else (jsonify(error="Anfrage von fremder Seite abgelehnt"), 403)
+
+
+@app.before_request
 def require_auth():
     if request.path.startswith(PUBLIC_PATHS):
         return None
@@ -386,8 +403,13 @@ def register_form():
 @app.post("/register")
 def register_submit():
     token = request.form.get("token", "")
+    ip = "reg:" + (request.remote_addr or "?")
+    if too_many(ip, 10, 600):
+        return render_page("register.html", "Zu viele Versuche. Bitte später erneut versuchen.",
+                           TOKEN="", DISABLED="disabled"), 429
     inv = open_invite(token)
     if not inv:
+        note_fail(ip)
         return render_page("register.html", "Diese Einladung ist ungültig oder abgelaufen.", TOKEN="", DISABLED="disabled"), 400
     username = request.form.get("username", "").strip()
     password = request.form.get("password", "")
@@ -423,10 +445,9 @@ def uid():
 
 def plants(u=None):
     rows = db().execute(
-        "SELECT key, name, active, target, threshold FROM plants WHERE user_id=? ORDER BY sort, key",
+        "SELECT key, name, active, target FROM plants WHERE user_id=? ORDER BY sort, key",
         (u or uid(),)).fetchall()
-    return [{"key": r["key"], "name": r["name"], "active": bool(r["active"]),
-             "target": r["target"], "threshold": r["threshold"]} for r in rows]
+    return [{"key": r["key"], "name": r["name"], "active": bool(r["active"]), "target": r["target"]} for r in rows]
 
 
 def weigh_sessions(u=None):
@@ -722,9 +743,8 @@ def update_plant(key):
         return jsonify(error=f"Kürzel {new_key} gibt es schon"), 400
     active = row["active"] if data.get("active") is None else int(bool(data["active"]))
     target = to_int(data["target"]) if "target" in data else row["target"]
-    threshold = to_int(data["threshold"]) if "threshold" in data else row["threshold"]
-    db().execute("UPDATE plants SET key=?, name=?, active=?, target=?, threshold=? WHERE user_id=? AND key=?",
-                 (new_key, name, active, target, threshold, uid(), key))
+    db().execute("UPDATE plants SET key=?, name=?, active=?, target=? WHERE user_id=? AND key=?",
+                 (new_key, name, active, target, uid(), key))
     if new_key != key:
         for table in ("weigh", "water", "note"):
             db().execute(f"UPDATE {table} SET plant=? WHERE user_id=? AND plant=?", (new_key, uid(), key))
