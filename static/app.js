@@ -167,7 +167,7 @@ $("#g-save").onclick = async () => {
 };
 
 // ---------- Verlauf
-function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#legend") {
+function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#legend", water = S.water) {
   const pts = weigh.slice(-24);
   if (pts.length < 2) return ($(el).innerHTML = '<p class="hint">Mindestens zwei Einträge nötig.</p>');
   const W = 600, H = 240, L = 52, R = 10, T = 10, B = 24;
@@ -185,6 +185,9 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
     svg += `<line x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}" stroke="${css("--line")}"/>` +
       `<text x="${L - 6}" y="${yy + 4}" text-anchor="end" font-size="15" fill="${css("--muted")}">${Math.round(v)}</text>`;
   }
+  (water || []).filter((w) => w.ts >= pts[0].ts && w.ts <= pts.at(-1).ts).forEach((w) => {  // Gießzeitpunkte
+    svg += `<line x1="${x(w.ts)}" x2="${x(w.ts)}" y1="${T}" y2="${H - B}" stroke="${css("--accent")}" stroke-width="1.5" stroke-dasharray="4 4" opacity=".6"/>`;
+  });
   plants.forEach((p, i) => {
     const line = pts.filter((s) => p.key in s.values).map((s) => `${x(s.ts)},${y(s.values[p.key])}`);
     if (line.length) svg += `<polyline fill="none" stroke="${css(COLORS[i % 5])}" stroke-width="2.5" points="${line.join(" ")}"/>`;
@@ -194,7 +197,8 @@ function renderChart(weigh = S.weigh, plants = S.plants, el = "#chart", lg = "#l
   });
   $(el).innerHTML = svg + "</svg>";
   $(lg).innerHTML = plants
-    .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</span>`).join("");
+    .map((p, i) => `<span><i style="background:var(${COLORS[i % 5]})"></i>${esc(p.key)}</span>`).join("") +
+    (water && water.length ? '<span><i style="background:var(--accent);opacity:.6"></i>Gießen</span>' : "");
 }
 function renderLog() {
   renderChart();
@@ -294,7 +298,7 @@ async function loadCommunity() {
     try {
       const p = await api("/api/profile/" + b.dataset.prof);
       $("#prof-title").textContent = p.username;
-      renderChart(p.weigh, p.plants, "#pchart", "#plegend");
+      renderChart(p.weigh, p.plants, "#pchart", "#plegend", p.water);
       $("#pwater").innerHTML = [...p.water].reverse().slice(0, 10).map((w) => {
         const ml = p.plants.filter((x) => x.key in w.ml).map((x) => `${x.key} ${w.ml[x.key]} ml`).join(" · ");
         const mix = [w.ph != null && `pH ${w.ph}`, w.alfa && `Alfa ${w.alfa}`, w.roots && `Roots ${w.roots}`, w.extra].filter(Boolean).join(" · ");
