@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 from flask import Flask, Response, g, jsonify, redirect, request, send_file, send_from_directory
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from markupsafe import escape
+from werkzeug.exceptions import BadRequest
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -185,7 +186,10 @@ def parse_ts(value):
     """ISO-String -> aware UTC datetime. Ohne Zone gilt lokale Zeit."""
     if not value:
         return now_utc()
-    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        raise BadRequest("Ungültige Zeitangabe")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=TZ)
     return dt.astimezone(timezone.utc).replace(microsecond=0)
@@ -426,8 +430,15 @@ def register_submit():
     if problem:
         return render_page("register.html", problem, TOKEN=token, DISABLED=""), 400
     conn = db()
-    uid_ = create_user(conn, username, password, "user")
-    conn.execute("UPDATE invites SET used_by=? WHERE token=?", (uid_, token))
+    try:
+        uid_ = create_user(conn, username, password, "user")
+    except sqlite3.IntegrityError:  # gleichzeitige Registrierung mit demselben Namen
+        return render_page("register.html", "Diesen Benutzernamen gibt es schon.", TOKEN=token, DISABLED=""), 400
+    # Einladung atomar einlösen: bei parallelen Anfragen gewinnt nur eine
+    if conn.execute("UPDATE invites SET used_by=? WHERE token=? AND used_by IS NULL", (uid_, token)).rowcount != 1:
+        conn.rollback()
+        note_fail(ip)
+        return render_page("register.html", "Diese Einladung ist ungültig oder abgelaufen.", TOKEN="", DISABLED="disabled"), 400
     conn.commit()
     return with_session(redirect("/"), conn.execute("SELECT * FROM users WHERE id=?", (uid_,)).fetchone())
 
@@ -598,7 +609,7 @@ def sw():
 def state():
     try:
         ensure_daily_backup()
-    except OSError:
+    except (OSError, sqlite3.Error):
         pass
     notes = [dict(r) for r in db().execute(
         "SELECT id, ts, plant, text FROM note WHERE user_id=? ORDER BY ts DESC, id DESC LIMIT 100", (uid(),))]
@@ -669,10 +680,10 @@ def add_water():
 @app.post("/api/note")
 def add_note():
     data = request.get_json(force=True)
-    text = (data.get("text") or "").strip()
+    text = str(data.get("text") or "").strip()[:2000]
     if not text:
         return jsonify(error="Leere Notiz"), 400
-    plant = data.get("plant") or None
+    plant = data.get("plant") if data.get("plant") in {p["key"] for p in plants()} else None
     db().execute("INSERT INTO note(user_id, ts, plant, text) VALUES (?,?,?,?)",
                  (uid(), iso(parse_ts(data.get("ts"))), plant, text))
     db().commit()
@@ -734,7 +745,7 @@ def update_plant(key):
     row = db().execute("SELECT * FROM plants WHERE user_id=? AND key=?", (uid(), key)).fetchone()
     if not row:
         return jsonify(error="Pflanze unbekannt"), 404
-    name = (data["name"] if data.get("name") is not None else row["name"]).strip()[:60]
+    name = str(data["name"] if data.get("name") is not None else row["name"]).strip()[:60]
     if not name:
         return jsonify(error="Name fehlt"), 400
     new_key = clean_key(data["key"]) if data.get("key") else key
@@ -744,6 +755,8 @@ def update_plant(key):
         return jsonify(error=f"Kürzel {new_key} gibt es schon"), 400
     active = row["active"] if data.get("active") is None else int(bool(data["active"]))
     target = to_int(data["target"]) if "target" in data else row["target"]
+    if target is not None and not 100 < target < 20000:
+        return jsonify(error="Ungültiges Zielgewicht"), 400
     db().execute("UPDATE plants SET key=?, name=?, active=?, target=? WHERE user_id=? AND key=?",
                  (new_key, name, active, target, uid(), key))
     if new_key != key:
@@ -778,7 +791,7 @@ def put_me():
     data = request.get_json(force=True)
     resp = jsonify(ok=True)
     if "webhook" in data:
-        hook = (data["webhook"] or "").strip()
+        hook = str(data["webhook"] or "").strip()
         if hook and not WEBHOOK_RE.fullmatch(hook):
             return jsonify(error="Das ist keine gültige Discord-Webhook-Adresse."), 400
         db().execute("UPDATE users SET webhook=? WHERE id=?", (hook or None, uid()))
@@ -1275,6 +1288,11 @@ def local_str(ts):
     return f"{loc(ts):%Y-%m-%d %H:%M}"
 
 
+def csv_safe(cell):
+    """Excel würde Zellen mit = + - @ als Formel ausführen: Apostroph davor."""
+    return "'" + cell if isinstance(cell, str) and cell[:1] in ("=", "+", "-", "@", "\t", "\r") else cell
+
+
 @app.get("/api/csv/<kind>")
 def export_csv(kind):
     names = {p["key"]: p["name"] for p in plants()}
@@ -1296,7 +1314,7 @@ def export_csv(kind):
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";")
     writer.writerow(header)
-    writer.writerows(rows)
+    writer.writerows([csv_safe(c) for c in row] for row in rows)
     return Response("\ufeff" + buf.getvalue(), mimetype="text/csv; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="growlog-{kind}-{datetime.now(TZ):%Y-%m-%d}.csv"'})
 
@@ -1358,15 +1376,17 @@ def discord_post():
     data = request.get_json(silent=True) or {}
     try:
         post_webhook(hook, data.get("text") or build_discord())
-    except urllib.error.URLError as exc:
+    except OSError as exc:  # URLError und Timeouts
         return jsonify(error=f"Discord: {exc}"), 502
     return jsonify(ok=True)
 
 
 def post_webhook(hook, text):
+    if len(text) > 1990:  # Discord-Limit 2000; Codeblock bleibt geschlossen
+        text = text[:1985].rstrip() + ("\n```" if text.startswith("```") else "")
     req = urllib.request.Request(
         hook,
-        data=json.dumps({"content": text[:1990]}).encode(),
+        data=json.dumps({"content": text}).encode(),
         headers={"Content-Type": "application/json", "User-Agent": "GrowLog/1.0"},
     )
     urllib.request.urlopen(req, timeout=10).read()

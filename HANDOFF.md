@@ -10,7 +10,7 @@ fertiger Discord-Block, Gieß-Assistent, Export/Backup, Mehrbenutzer. Läuft als
 
 ## Stack und Struktur
 - Flask + SQLite (`sqlite3`, Backup-API), gunicorn (`-w 1 --threads 4`, Port 8087). `-w 1` bewusst: Rate-Limit und Server-Config (TZ, Proxy) liegen im Prozessspeicher.
-- `app.py` (~1300 Zeilen, alles Backend), `static/` mit `index.html`, `app.js`, `style.css`, `sw.js` (Cache-Name hochzählen bei UI-Änderungen, aktuell `growlog-v9`), `login.html`, `register.html`, `setup.html`, Manifest, Icons.
+- `app.py` (~1300 Zeilen, alles Backend), `static/` mit `index.html`, `app.js`, `style.css`, `sw.js` (Cache-Name hochzählen bei UI-Änderungen, aktuell `growlog-v16`), `login.html`, `register.html`, `setup.html`, Manifest, Icons.
 - Reines Vanilla-JS, keine Build-Tools. `Dockerfile` (python:3.13-slim), `requirements.txt` (flask 3.1, gunicorn 23).
 - CI: `.github/workflows/docker.yml` baut bei Push auf `main` das Image `ghcr.io/igridz/growlog:latest` (amd64). Repo: https://github.com/iGridZ/Growlog (Eigentümer iGridZ).
 
@@ -43,6 +43,13 @@ pytest-Suite in `tests/` (Flask-Testclient): Auth, Datentrennung, v1-Migration, 
 5. **Aufräumen:** `app.py` ist groß – ggf. in Module aufteilen (auth, assist, api); `__pycache__` in `.gitignore` prüfen.
 6. **Sicherheit prüfen:** CSRF (SameSite=Lax + JSON-API), Rate-Limits der Einladungs-/Setup-Routen, Passwort-Regeln.
 7. Alfa-/Roots-Mengen der Gießeinträge vom 25.10. fehlen (im Verlauf-Tab nachtragen, kein Code nötig).
+
+## Verlauf-Auswertung (vorhanden, bisher nicht dokumentiert)
+`/api/insights` liefert `week_summary` (letzte 7 Tage: ml gegossen, g Verbrauch je Tag) und `backtest` (Prognose-Check: Vorhersage mit dem Wissen der vorherigen Messung gegen das echte Gewicht, Ø-Abweichung). Anzeige im Tab Verlauf.
+
+## Offen aus dem Code-Review (2026-11-02)
+- **Ohne Wiegen nutzbar machen** (große Töpfe, seit 2026-11-01): Discord-Block, Erinnerung und Assistent hängen heute an Gewichten. Erst `/anforderungen`.
+- Einträge bearbeiten (heute nur löschen + neu eintragen); Nährstoff-Felder (AlfaBoost/Betta Roots) sind fest verdrahtet; Listen im Verlauf zeigen nur 30/20 Einträge; kein Admin-Passwort-Reset per CLI; `trust_proxy` ist standardmäßig an (bei direktem Zugriff ohne Proxy lässt sich die IP fälschen).
 
 ## Schwellenwert im Gieß-Assistenten – erledigt (2026-10-27)
 Erik gießt nach Gefühl, nicht nach Gramm. Die automatische Schwelle samt Füllstand-%, due_at/hours_left und schwellenbasierter Terminwahl wurde entfernt (compute_assist, Frontend, Cache growlog-v9). Die Spalte plants.threshold bleibt aus Kompatibilitätsgründen in der DB, wird aber nicht mehr verwendet. Gießtermin = nächste Gießzeit aus den Einstellungen.

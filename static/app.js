@@ -59,7 +59,7 @@ function renderAssist() {
       `<span class="muted">${toTarget != null ? sign(toTarget) + " g zum Ziel" : ""}</span></div>` +
       (a.target ? `<small>Ziel ${a.target} g${a.target_manual ? "" : " (auto)"}</small>` : "") +
       (a.rate_lit != null ? `<small>Verbrauch: Licht ~${dnum(a.rate_lit)} g/h · Dunkel ~${dnum(a.rate_dark)} g/h · ≈ ${a.use24} g/Tag</small>` : "") +
-      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g → ca. <b>${a.suggest_ml} ml</b></div>` : "") + `</div>`;
+      (a.slot_at ? `<div class="as-due">Gießen: <b>${slotText(a)}</b> · erwartet ${a.slot_expected} g${a.suggest_ml ? ` → ca. <b>${a.suggest_ml} ml</b>` : " · kein Gießen nötig"}</div>` : "") + `</div>`;
   }).join("") + '<p class="hint">Richtwerte aus deinen Messungen: Licht und Dunkel getrennt, neuere Messungen zählen stärker, Wachstum eingerechnet. Ob gegossen wird, entscheidest du nach Gefühl. Das Ziel kannst du im Tab „Pflanzen“ selbst setzen.</p>';
 }
 
@@ -84,7 +84,7 @@ function renderWeighForm() {
   $("#w-fields").innerHTML = !act().length ? NOPLANTS : act()
     .map((p) => {
       const lw = lastWeigh(p.key);
-      return `<div class="plant"><div class="name"><b>${p.key}</b><small>${p.name}${
+      return `<div class="plant"><div class="name"><b>${p.key}</b><small>${esc(p.name)}${
         lw ? ` · zuletzt ${lw.values[p.key]} g` : ""
       }</small><div class="delta" id="wd-${p.key}"></div></div>
       <input type="number" inputmode="numeric" enterkeyhint="next" data-k="${p.key}" placeholder="g" value="${keep[p.key] || ""}"></div>`;
@@ -138,7 +138,7 @@ function renderWaterForm() {
     .map((p) => {
       const lastW = [...S.water].reverse().find((w) => p.key in w.ml);
       const A = (S.assist || {})[p.key];
-      return `<div class="plant"><div class="name"><b>${p.key}</b><small>${p.name}${
+      return `<div class="plant"><div class="name"><b>${p.key}</b><small>${esc(p.name)}${
         lastW ? ` · zuletzt ${lastW.ml[p.key]} ml` : ""
       }</small>${A && A.suggest_ml > 0 ? `<div><button type="button" class="link sug" data-sug="${p.key}" data-ml="${A.suggest_ml}">Vorschlag ${A.suggest_ml} ml</button></div>` : ""}</div>
       <input type="number" inputmode="numeric" data-k="${p.key}" placeholder="ml" value="${keep[p.key] || ""}"></div>`;
@@ -254,25 +254,26 @@ function renderLog() {
   $("#water-list").innerHTML = [...S.water].reverse().slice(0, 20).map((w) => {
     const ml = S.plants.filter((p) => p.key in w.ml).map((p) => `${p.key} ${w.ml[p.key]} ml`).join(" · ");
     const mix = [w.ph != null && `pH ${w.ph}`, w.alfa && `Alfa ${w.alfa}`, w.roots && `Roots ${w.roots}`, w.extra].filter(Boolean).join(" · ");
-    return `<div class="item"><div><div class="when">${fmtTs(w.ts)}</div><div class="vals">${ml}</div>${mix ? `<div class="when">${mix}</div>` : ""}</div>
+    return `<div class="item"><div><div class="when">${fmtTs(w.ts)}</div><div class="vals">${ml}</div>${mix ? `<div class="when">${esc(mix)}</div>` : ""}</div>
       <button data-del="water/${w.ids}">✕</button></div>`;
   }).join("") || '<p class="hint">Noch nichts.</p>';
   $("#note-list").innerHTML = S.notes.map((n) =>
-    `<div class="item"><div><div class="when">${fmtTs(n.ts)}${n.plant ? " · " + n.plant : ""}</div><div>${esc(n.text)}</div></div>
+    `<div class="item"><div><div class="when">${fmtTs(n.ts)}${n.plant ? " · " + esc(n.plant) : ""}</div><div>${esc(n.text)}</div></div>
      <button data-del="note/${n.id}">✕</button></div>`).join("") || '<p class="hint">Noch keine Notizen.</p>';
   document.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
     if (!confirm("Eintrag löschen?")) return;
-    await api("/api/" + b.dataset.del, "DELETE");
-    await load();
+    try { await api("/api/" + b.dataset.del, "DELETE"); await load(); } catch (e) { toast(e.message, true); }
   }));
 }
 const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 $("#n-save").onclick = async () => {
   const text = $("#n-text").value.trim();
   if (!text) return;
-  await api("/api/note", "POST", { text, plant: $("#n-plant").value });
-  $("#n-text").value = "";
-  await load();
+  try {
+    await api("/api/note", "POST", { text, plant: $("#n-plant").value });
+    $("#n-text").value = "";
+    await load();
+  } catch (e) { toast(e.message, true); }
 };
 
 // ---------- Pflanzen
@@ -391,7 +392,8 @@ $("#hook-save").onclick = async () => {
 };
 $("#hook-remove").onclick = async () => {
   if (!confirm("Webhook entfernen?")) return;
-  await api("/api/me", "PUT", { webhook: "" }); toast("Webhook entfernt"); await load(); renderAccount();
+  try { await api("/api/me", "PUT", { webhook: "" }); toast("Webhook entfernt"); await load(); renderAccount(); }
+  catch (err) { toast(err.message, true); }
 };
 async function loadUsers() {
   let d;
@@ -442,7 +444,9 @@ $("#inv-create").onclick = async () => {
 // ---------- Discord
 let discordText = "";
 async function loadDiscord() {
-  const d = await api("/api/discord?water=" + ($("#d-water").checked ? 1 : 0));
+  let d;
+  try { d = await api("/api/discord?water=" + ($("#d-water").checked ? 1 : 0)); }
+  catch (e) { return toast(e.message, true); }
   discordText = d.text;
   $("#d-text").textContent = d.text.replace(/^```\n?|\n?```$/g, "");
   $("#d-post").disabled = !S.webhook;

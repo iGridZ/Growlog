@@ -64,14 +64,14 @@ umbenennen oder entfernen. Pflanzen mit Einträgen werden nur archiviert, der Ve
 
 ## Gieß-Übersicht (Richtwerte)
 
-Im Tab "Wiegen" zeigt die App pro Pflanze den Füllstand, den Verbrauch und einen Gießtermin mit ml-Vorschlag.
+Im Tab "Wiegen" zeigt die App pro Pflanze das Gewicht, den Verbrauch und die Prognose zur nächsten Gießzeit mit ml-Vorschlag.
 
 - **Verbrauch** wird aus deinen Messungen berechnet, aber nicht als Tagesdurchschnitt: Licht- und Dunkelphase werden
   getrennt betrachtet (Zeiten im Tab "Pflanzen" unter "Zeiten"), neuere Messungen zählen stärker (Halbwertszeit 2 Tage)
   und ein Wachstumstrend wird eingerechnet. Daraus entsteht eine Prognose in 15-Minuten-Schritten.
-- **Ziel- und Schwellengewicht** kommen automatisch aus dem letzten Gießen (Ziel = erste Messung danach,
-  Schwelle = Messung davor) oder werden im Tab "Pflanzen" von Hand gesetzt.
-- **Gießtermin:** der letzte deiner Gießzeitpunkte (Standard 17:30), bevor die Schwelle vor dem nächsten erreicht würde.
+- **Zielgewicht** kommt automatisch aus der ersten Messung nach dem letzten Gießen oder wird im Tab "Pflanzen"
+  von Hand gesetzt.
+- **Gießzeit:** die nächste Gießzeit aus den Einstellungen (Standard 17:30). Ob gegossen wird, entscheidest du nach Gefühl.
 - **ml-Vorschlag:** (Ziel − erwartetes Gewicht zum Gießzeitpunkt) / gemessenes Verhältnis g pro ml aus deinen bisherigen
   Gießvorgängen. Beim Eintippen eines Gewichts siehst du sofort die ml bis zum Ziel.
 
