@@ -11,4 +11,5 @@ Projekt: GrowLog (Flask + SQLite + Vanilla-JS-PWA). Vollständige Übergabe und 
 - Jedes Feature auf eigenem Branch (`feature/…`). Test-Container auf dem Server (Port 8088, Datenkopie), erst nach Erik's Ja nach `main`.
 - Vor jedem UI-Push im Browser prüfen (lokal mit Testdaten, Konsole auf Fehler lesen). `node --check` und pytest reichen nicht.
 - Nicht raten bei Design-Entscheidungen (Prognose-Modell, Datenmodell, neue Verfahren, Anzeige): zuerst `/anforderungen` nutzen oder das Verständnis in 2–3 Sätzen bestätigen lassen und auf Antwort warten.
+- `TASK.md` führen: Offenes oben, Erledigtes unten mit Datum. Nach jeder Arbeitssitzung aktualisieren.
 - Wörter wie „Art“, „Variante“, „Verfahren“, „Methode“ sind mehrdeutig: zurückfragen, was genau gemeint ist, bevor gebaut wird.
