@@ -2,6 +2,8 @@ name: build-image
 on:
   push:
     branches: [main]
+  pull_request:          # PRs: test + build only, nothing is pushed
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,8 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: pip install -r requirements-dev.txt
@@ -20,20 +22,21 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/login-action@v4
+        if: github.event_name == 'push'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: type=raw,value=latest
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
